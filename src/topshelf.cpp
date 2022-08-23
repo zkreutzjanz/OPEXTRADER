@@ -595,8 +595,8 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
     MPI_Barrier(MPI_COMM_WORLD);
     std::vector<ticker> localTickers;
     int commonPartition = (tickers.size()/size>0)?tickers.size()/size:1;
-    for(int i =commonPartition*rank;i<((rank==size-1)?tickers.size():commonPartition*(rank+1));i++){
-        localTickers.push_back(tickers.at(i));
+    for(int i =0;i<tickers.size();i++){
+        if(rank==i%size) localTickers.push_back(tickers.at(i));
     }
 
     log("initialization::Identified Local Tickers");
@@ -613,19 +613,17 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
     MPI_Barrier(MPI_COMM_WORLD);
     std::vector<datapoint> localDatapoints;
     for(int i=0;i<unClusteredDatapoints.size();i++){
-        bool found = false;
-        int j=0;
-        while(j<localTickers.size()&&!found){
-            if(localTickers.at(j).id=unClusteredDatapoints.at(i).id){
+        for(int j = 0;j<localTickers.size();j++){
+            if(localTickers.at(j).id==unClusteredDatapoints.at(i).id){
                 localDatapoints.push_back(unClusteredDatapoints.at(i));
-                found==true;
+                j=localTickers.size();
             }
-            j++;
         }
     }
     //std::vector<ticker>().swap(localTickers);
     //std::vector<ticker>().swap(tickers);
     log("initialization::Identified Local Datapoints");
+    
     MPI_Barrier(MPI_COMM_WORLD);
 
 
@@ -642,6 +640,7 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
         }
     );
     log("initialization::Sorted Datapoints");
+    log(std::to_string(localDatapoints.size()));
     MPI_Barrier(MPI_COMM_WORLD);
 
 
@@ -649,19 +648,20 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
     log("initialization::Regathering Datapoints");
     MPI_Barrier(MPI_COMM_WORLD);
     int localDatapointCount = localDatapoints.size();
-    std::vector<int> datapointCounts;
     std::vector<datapoint> finalDatapoints;
-    if(rank==0) datapointCounts.resize(size);
+    std::vector<int> datapointCounts;
+    datapointCounts.resize(size);
+	int* datapointDispls = new int[size];
+    if(rank==0) datapointDispls[0]=0;
+    log(std::to_string(localDatapointCount));
+    MPI_Barrier(MPI_COMM_WORLD);
     MPI_Gather(&localDatapointCount,1,MPI_INT,&datapointCounts[0],size,MPI_INT,0,MPI_COMM_WORLD);
-    std::vector<int> datapointDispls;
-    for(int i=0;i<datapointCounts.size();i++){
-        datapointDispls.push_back((int)(datapointCount/size)*i);
-        log(std::to_string(i)+"::"+std::to_string(datapointCounts[i])+"::"+std::to_string(datapointDispls[i]));
+    for(int i=1;i<size;i++){
+        if(rank==0) datapointDispls[i]=datapointDispls[i-1]+datapointCounts.at(i-1);
+        if(rank==0) log(std::to_string(i)+"::"+std::to_string(datapointCounts.at(i))+"::"+std::to_string(datapointDispls[i]));
     }
     if(rank==0) finalDatapoints.resize(datapointCount);
-    MPI_Gatherv(&localDatapoints[0],localDatapointCount,datapointDatatype,&finalDatapoints[0],&datapointCounts[0],&datapointDispls[0],datapointDatatype,0,MPI_COMM_WORLD);
-    std::vector<int>().swap(datapointDispls);
-    std::vector<int>().swap(datapointCounts);
+    MPI_Gatherv(&localDatapoints[0],localDatapointCount,datapointDatatype,&finalDatapoints[0],&datapointCounts[0],datapointDispls,datapointDatatype,0,MPI_COMM_WORLD);
     std::vector<datapoint>().swap(localDatapoints);
     std::vector<datapoint>().swap(unClusteredDatapoints);
     log("initialization::Regathered Datapoints");
