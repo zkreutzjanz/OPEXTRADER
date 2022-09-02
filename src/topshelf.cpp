@@ -16,6 +16,7 @@
 //no
 //Definitions
 const int TICKER_NAME_LENGTH =8;
+const int LINE_LOG_LENGTH=100000;
 struct datapoint{
     unsigned long long id=0;
     char name[TICKER_NAME_LENGTH]={' '};
@@ -33,8 +34,28 @@ struct ticker{
     double std;
 };
 MPI_Datatype tickerDatatype;
+struct report{
+    ticker base;
+    ticker target;
+    double baseMinBound;
+    double baseMaxBound;
+    double targetMinBound;
+    double targetMaxBound;
+    long long timeMinBound;
+    long long timeMaxBound;
+    int totalTarget;
+    int totalTargetInBound;
+    int totalBase;
+    int totalBaseInBound;
+    double likelihood;
+    double zScore;
+    int dayDifference;
+};
+MPI_Datatype reportDatatype;
+
 
 //Globals
+//to do, get rid of
 std::vector<ticker> finalTickerSchema;
 std::vector<datapoint> clusteredDatapoints;
 int rank;
@@ -53,7 +74,7 @@ void log(std::string message){
     #if TIME
     struct timeval tp;
     gettimeofday(&tp,NULL);
-    timestamp = " TIME: "+std::to_string(tp.tv_usec);;
+    timestamp = " TIME: "+std::to_string(time(0))+"."+std::to_string(tp.tv_usec+1000000).substr(1,6);;
     //timestamp = " TIME: "+std::to_string(time(0));
     #endif
 	#if LOG
@@ -61,9 +82,6 @@ void log(std::string message){
 	MPI_Comm_size(MPI_COMM_WORLD,&size);
 	int rank;
 	MPI_Comm_rank(MPI_COMM_WORLD,&rank);
-    
-    
-   
     
 	std::string output= "NODE: "+std::to_string(100+rank).substr(1,2)+timestamp+" LOG: "+message+"\n";
 	std::cout<<output;
@@ -110,8 +128,7 @@ bool parseSourceCSVLineToDataPoint(datapoint *out,std::string line,std::string d
 			out->open = open;
 			out->change = (close/open)-1;
             out->time = time;
-            //log("DP: "+(std::string)out->name+"ID: "+std::to_string(out->id)+"TM: "+std::to_string(out->time));
-			return true;
+            return true;
 	}else return false;
 }
 
@@ -241,12 +258,11 @@ void loadFileToDataStructure(std::string *fileName,std::vector<T> *output,bool l
         T temp;
         bool readable = lineParseFunction(&temp,line,",");
         if(readable) output->push_back(temp);
-        //log(line);
         
 		#if LOG
         if(!readable) log("loadFileToDataStructure::PARSE FAILURE on <"+line+">");
 		if(readable) linesParsed++;
-		if(linesParsed%10==0) log("loadFileToDataStructure::Parsed <"+std::to_string(linesParsed)+"> Lines");
+		if(linesParsed%LINE_LOG_LENGTH==0) log("loadFileToDataStructure::Parsed <"+std::to_string(linesParsed)+"> Lines");
 		#endif
     }
     log("loadFileToDataStructure:: <"+std::to_string(linesParsed)+"> Lines Parsed");
@@ -262,12 +278,13 @@ void loadFileToDataStructure(std::string *fileName,std::vector<T> *output,bool l
  */
 template<typename T>
 void loadDatastructsToFile(std::string *fileName,std::vector<T> *input,void datastructParseFunction(T *,std::string,std::string *)){
-    log(std::to_string(input->size()));
 	log("loadDatastructsToFile::Opening file <"+*fileName+">");
     MPI_File myFile;
     char fntmp[fileName->length()];
     strcpy(fntmp,fileName->c_str());
+    MPI_File_delete(fntmp,MPI_INFO_NULL);
     MPI_File_open(MPI_COMM_WORLD,fntmp,MPI_MODE_RDWR|MPI_MODE_CREATE,MPI_INFO_NULL,&myFile);
+    
 	log("loadDatastructsToFile::File <"+*fileName+"> opened");
     #if LOG
 	int linesWritten=0; 
@@ -281,11 +298,9 @@ void loadDatastructsToFile(std::string *fileName,std::vector<T> *input,void data
         strcpy(tempChar, temp.c_str());
         MPI_Status testStatus;
         MPI_File_write(myFile,tempChar,temp.length(),MPI_CHAR,&testStatus);
-        //log(temp);
-        //log(std::to_string(input->at(i).id)+"ggg");
         #if LOG
 		linesWritten++;
-		if(linesWritten%10==0) log("loadDatastructsToFile::wrote <"+std::to_string(linesWritten)+"> Lines");
+		if(linesWritten%LINE_LOG_LENGTH==0) log("loadDatastructsToFile::wrote <"+std::to_string(linesWritten)+"> Lines");
 		#endif
     }}
     
@@ -300,7 +315,7 @@ void loadDatastructsToFile(std::string *fileName,std::vector<T> *input,void data
  * @param datapointInput pointer to datapoints vector to take as input
  * @param datapointOutput pointer to datapoints vector to output data to
  * @param tickerSchemaOutput pointer to ticker vector to output schema data to
- */
+ *
 void clusterDatapoints(std::vector<datapoint> *datapoints,std::vector<ticker> *tickerSchemaOutput){
     std::sort(
         datapoints->begin(),
@@ -341,9 +356,10 @@ void clusterDatapoints(std::vector<datapoint> *datapoints,std::vector<ticker> *t
             tickerSchemaOutput->push_back(newTicker);
         }
         
-    }**/
+    }
     
 }
+**/
 
 /**
  * @brief Declare datatypes used for MPI calls
@@ -370,10 +386,8 @@ void shareDatapoints(){
     MPI_Bcast(&finalTickerCount,1,MPI_INT,0,MPI_COMM_WORLD);
     int finalDatapointCount = clusteredDatapoints.size();
     MPI_Bcast(&finalDatapointCount,1,MPI_INT,0,MPI_COMM_WORLD);
-    MPI_Barrier(MPI_COMM_WORLD);
     if(rank>0) finalTickerSchema.resize(finalTickerCount);
     MPI_Bcast(finalTickerSchema.data(),finalTickerCount,tickerDatatype,0,MPI_COMM_WORLD);
-    MPI_Barrier(MPI_COMM_WORLD);
     if(rank>0) clusteredDatapoints.resize(finalDatapointCount);
     MPI_Bcast(&(clusteredDatapoints[0]),finalDatapointCount,datapointDatatype,0,MPI_COMM_WORLD);
 }
@@ -509,6 +523,7 @@ void identifyTickersFromDatapoints(std::vector<datapoint> *in, std::vector<ticke
      #if LOG
 	int tickersIdentified=0; 
 	#endif
+
     for(int i =0;i<in->size();i++){
         bool found = false;
         int j=0;
@@ -519,7 +534,6 @@ void identifyTickersFromDatapoints(std::vector<datapoint> *in, std::vector<ticke
         if(!found){
             ticker newticker;
             newticker.id=in->at(i).id;
-            //log("identifyTickersFromDatapoints::New Ticker <"+std::to_string(newticker.id)+">");
             out->push_back(newticker);
              #if LOG
 		    tickersIdentified++;
@@ -534,16 +548,18 @@ void generateTickerSchema(std::vector<datapoint> *in,std::vector<ticker> *out){
     ticker currentTicker;
     currentTicker.clusterStart=0;
     currentTicker.id=in->at(0).id;
-    int sum=0;
+    double sum=in->at(0).change;
     for(int i=1;i<in->size();i++){
         if(in->at(i).id!=currentTicker.id){
             currentTicker.clusterEnd=i-1;
             currentTicker.mean=(double)sum/(double)(currentTicker.clusterEnd-currentTicker.clusterStart+1);
+            
             double stdSum;
             for(int j = currentTicker.clusterStart;j<currentTicker.clusterEnd+1;j++){
                 stdSum += pow(in->at(j).change-currentTicker.mean,2.0);
             }
             currentTicker.std= sqrt(stdSum/(double)(currentTicker.clusterEnd-currentTicker.clusterStart+1));
+            //log(std::to_string(i)+":::"+std::to_string(sum)+"::"+std::to_string(currentTicker.clusterEnd-currentTicker.clusterStart+1)+"::"+std::to_string(currentTicker.mean)+"::"+std::to_string(currentTicker.std));
             out->push_back(currentTicker);
             currentTicker.id=in->at(i).id;
             currentTicker.clusterStart=i;
@@ -557,51 +573,91 @@ void generateTickerSchema(std::vector<datapoint> *in,std::vector<ticker> *out){
 }
 
 
-void initializationClusterAndSort(std::string inputFileName,std::string datapointsFileName, std::string tickerSchemasFileName){
+void initialization(std::string inputFileName,std::string datapointsFileName, std::string tickerSchemasFileName){
 
     //O(1)
     log("initialization::Declaring Datatypes");
     declareDatatypes();
     log("initialization::Declared Datatypes");
 
-    //O unknown
+
+    //Unknown BC IO
     log("initialization::Loading File to Datapoints Vector");
     std::vector<datapoint> unClusteredDatapoints;
     if(rank ==0) loadFileToDataStructure(&inputFileName,&unClusteredDatapoints,&parseSourceCSVLineToDataPoint);
-    
     log("initialization::Loaded File to Datapoints Vector");
-    MPI_Barrier(MPI_COMM_WORLD);
-    //O unkown
-    log("initialization::Sharing Datapoints");
-    MPI_Barrier(MPI_COMM_WORLD);
+
+
+    //Unknown BC MPI
+    log("initialization::Sharing UnClustered Datapoints");
     int datapointCount = unClusteredDatapoints.size();
     MPI_Bcast(&datapointCount,1,MPI_INT,0,MPI_COMM_WORLD);
     if(rank!=0) unClusteredDatapoints.resize(datapointCount);
     MPI_Bcast(&unClusteredDatapoints[0],datapointCount,datapointDatatype,0,MPI_COMM_WORLD);
-    log("initialization::Shared Datapoints");
-    MPI_Barrier(MPI_COMM_WORLD);
+    log("initialization::Shared UnClustered Datapoints");
 
-    //~O(datapointcount*tickercount)
-    log("initialization::Identifying Tickers");
-    MPI_Barrier(MPI_COMM_WORLD);
+    //~O(datapointcount/cores)
+    log("initialization::Getting Local UnClustered Datapoints");
+    std::vector<datapoint> localUnClusteredDatapoints;
+    for(int i = rank;i<datapointCount;i+=size){
+        localUnClusteredDatapoints.push_back(unClusteredDatapoints.at(i));
+    }
+    log("initialization::Got Local UnClustered Datapoints");
+
+
+    //~O(datapointcount*tickercount/cores)
+    log("initialization::Identifying Local UnClustered Tickers");
+    std::vector<ticker> localUnClusteredTickers;
+    identifyTickersFromDatapoints(&localUnClusteredDatapoints,&localUnClusteredTickers);
+    log("initialization::Identified Local UnClustered Tickers");
+
+    //Unknown BC MPI
+    log("initialization::Regathering UnClustered Tickers");
+    int localUnClusteredTickersCount = localUnClusteredTickers.size();
     std::vector<ticker> tickers;
-    identifyTickersFromDatapoints(&unClusteredDatapoints,&tickers);
-    log(std::to_string(tickers.size()));
-    log("initialization::Identified Tickers");
-    MPI_Barrier(MPI_COMM_WORLD);
+    std::vector<int> unClusteredTickersCounts;
+    unClusteredTickersCounts.resize(size);
+    std::vector<int> unClusteredTickersDispls;
+    unClusteredTickersDispls.push_back(0);
+    MPI_Allgather(&localUnClusteredTickersCount,1,MPI_INT,&unClusteredTickersCounts[0],1,MPI_INT,MPI_COMM_WORLD);
+    int tickerCountsSum = unClusteredTickersCounts.at(0);
+    for(int i=1;i<size;i++){
+        unClusteredTickersDispls.push_back(unClusteredTickersDispls.at(i-1)+unClusteredTickersCounts.at(i-1));
+        tickerCountsSum += unClusteredTickersCounts.at(i);
+    }
+    log(std::to_string(tickerCountsSum));
+    tickers.resize(tickerCountsSum);
+    MPI_Allgatherv(&localUnClusteredTickers[0],localUnClusteredTickersCount,tickerDatatype,&tickers[0],&unClusteredTickersCounts[0],&unClusteredTickersDispls[0],tickerDatatype,MPI_COMM_WORLD);
+    log("initialization::Regathered UnClustered Tickers");
+
+    //Unknown BC std::
+    log("initialization::DeDuplicating UnClustered Tickers");
+    std::sort(
+        tickers.begin(),
+        tickers.end(),
+        [](ticker &a,ticker &b){
+            return a.id<b.id;
+        }
+    );
+    auto last = std::unique(
+        tickers.begin(), 
+        tickers.end(),
+        [](ticker &a,ticker &b){
+            return a.id==b.id;
+        }
+    );
+    tickers.erase(last, tickers.end());
+    log("initialization::DeDuplicated UnClustered Tickers");
+
 
     //~O(tickercount/cores)
     log("initialization::Identifying Local Tickers");
-    MPI_Barrier(MPI_COMM_WORLD);
     std::vector<ticker> localTickers;
     int commonPartition = (tickers.size()/size>0)?tickers.size()/size:1;
     for(int i =0;i<tickers.size();i++){
         if(rank==i%size) localTickers.push_back(tickers.at(i));
     }
-
     log("initialization::Identified Local Tickers");
-    log(std::to_string(localTickers.size()));
-    MPI_Barrier(MPI_COMM_WORLD);
 
 
     //The next two sections could be combined
@@ -610,7 +666,6 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
 
     //~O(datapointcount*tickercount/cores)
     log("initialization::Identifying Local Datapoints");
-    MPI_Barrier(MPI_COMM_WORLD);
     std::vector<datapoint> localDatapoints;
     for(int i=0;i<unClusteredDatapoints.size();i++){
         for(int j = 0;j<localTickers.size();j++){
@@ -620,16 +675,13 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
             }
         }
     }
-    //std::vector<ticker>().swap(localTickers);
-    //std::vector<ticker>().swap(tickers);
+    std::vector<ticker>().swap(localTickers);
+    std::vector<ticker>().swap(tickers);
     log("initialization::Identified Local Datapoints");
-    
-    MPI_Barrier(MPI_COMM_WORLD);
 
 
     //~O(?) sorting
     log("initialization::Sorting Datapoints");
-    MPI_Barrier(MPI_COMM_WORLD);
     std::sort(
         localDatapoints.begin(),
         localDatapoints.end(),
@@ -640,51 +692,44 @@ void initializationClusterAndSort(std::string inputFileName,std::string datapoin
         }
     );
     log("initialization::Sorted Datapoints");
-    log(std::to_string(localDatapoints.size()));
-    MPI_Barrier(MPI_COMM_WORLD);
 
 
     //regather O(unkown)
     log("initialization::Regathering Datapoints");
-    MPI_Barrier(MPI_COMM_WORLD);
     int localDatapointCount = localDatapoints.size();
     std::vector<datapoint> finalDatapoints;
+    if(rank==0) finalDatapoints.resize(datapointCount);
     std::vector<int> datapointCounts;
     datapointCounts.resize(size);
-	int* datapointDispls = new int[size];
-    if(rank==0) datapointDispls[0]=0;
-    log(std::to_string(localDatapointCount));
-    MPI_Barrier(MPI_COMM_WORLD);
-    MPI_Gather(&localDatapointCount,1,MPI_INT,&datapointCounts[0],size,MPI_INT,0,MPI_COMM_WORLD);
+    std::vector<int> datapointDispls;
+    if(rank==0) datapointDispls.push_back(0);
+    MPI_Gather(&localDatapointCount,1,MPI_INT,&datapointCounts[0],1,MPI_INT,0,MPI_COMM_WORLD);
     for(int i=1;i<size;i++){
-        if(rank==0) datapointDispls[i]=datapointDispls[i-1]+datapointCounts.at(i-1);
-        if(rank==0) log(std::to_string(i)+"::"+std::to_string(datapointCounts.at(i))+"::"+std::to_string(datapointDispls[i]));
+        if(rank==0) datapointDispls.push_back(datapointDispls.at(i-1)+datapointCounts.at(i-1));
     }
-    if(rank==0) finalDatapoints.resize(datapointCount);
-    MPI_Gatherv(&localDatapoints[0],localDatapointCount,datapointDatatype,&finalDatapoints[0],&datapointCounts[0],datapointDispls,datapointDatatype,0,MPI_COMM_WORLD);
+    MPI_Gatherv(&localDatapoints[0],localDatapointCount,datapointDatatype,&finalDatapoints[0],&datapointCounts[0],&datapointDispls[0],datapointDatatype,0,MPI_COMM_WORLD);
     std::vector<datapoint>().swap(localDatapoints);
     std::vector<datapoint>().swap(unClusteredDatapoints);
     log("initialization::Regathered Datapoints");
-MPI_Barrier(MPI_COMM_WORLD);
+
 
 
     log("initialization::Generating Ticker Schema");
-    MPI_Barrier(MPI_COMM_WORLD);
     std::vector<ticker> finalTickers;
     if(rank==0) generateTickerSchema(&finalDatapoints,&finalTickers);
     log("initialization::Generated Ticker Schema");
-MPI_Barrier(MPI_COMM_WORLD);
+    
+
+
     log("initialization::Loading Datapoints Vector to File");
-    MPI_Barrier(MPI_COMM_WORLD);
-    log(std::to_string(finalDatapoints.size()));
     loadDatastructsToFile(&datapointsFileName,&finalDatapoints,&parseDataPointToStorageLine);
     log("initialization::Loaded Datapoints Vector to File");
-MPI_Barrier(MPI_COMM_WORLD);
+
+
+
     log("initialization::Loading ticker schemas Vector to File");
-    MPI_Barrier(MPI_COMM_WORLD);
     loadDatastructsToFile(&tickerSchemasFileName,&finalTickers,&parseTickerToStorageLine);
     log("initialization::Loaded ticker schemas Vector to File");
-    MPI_Barrier(MPI_COMM_WORLD);
 }
 
 
@@ -756,20 +801,58 @@ void startup(std::string datapointFileName,std::string tickerSchemaFileName){
     log("startup::Declared Datatypes");
 
     log("startup::Loading File to Datapoints Vector");
-    if(rank==0){
-        loadFileToDataStructure(&datapointFileName,&clusteredDatapoints,&parseStorageLineToDataPoint);
-    }
+    if(rank==0) loadFileToDataStructure(&datapointFileName,&clusteredDatapoints,&parseStorageLineToDataPoint);
     log("startup::Loaded File to Datapoints Vector");
 
     log("startup::Loading File ticker schemas Vector");
-    if(rank==0){
-        loadFileToDataStructure(&tickerSchemaFileName,&finalTickerSchema,&parseStorageLineToTicker);
-    }
+    if(rank==0) loadFileToDataStructure(&tickerSchemaFileName,&finalTickerSchema,&parseStorageLineToTicker);
     log("startup::Loaded File to ticker schemas Vector");
 
     log("startup::sharing vectors");
     shareDatapoints();
     log("startup::shared vectors");
+}
+
+
+void changeAnalysis(report *in,std::vector<report> *out){
+    std::vector<datapoint> baseInBound;
+    for(int i=in->base.clusterStart;i<in->base.clusterEnd+1;i++){
+        if(clusteredDatapoints.at(i).change<=in->baseMaxBound&&clusteredDatapoints.at(i).change>=in->baseMaxBound&&clusteredDatapoints.at(i).time<=in->timeMaxBound&&clusteredDatapoints.at(i).time>=in->timeMinBound){
+           baseInBound.push_back(clusteredDatapoints.at(i));
+        }
+    }
+    in->totalBase = in->base.clusterEnd-in->base.clusterStart +1;
+    in->totalBaseInBound = baseInBound.size();
+    for(int i =0;i<finalTickerSchema.size();i++){
+        if(finalTickerSchema.at(i).id==in->base.id) break;
+        int startID = finalTickerSchema.at(i).clusterStart;
+        int endID = finalTickerSchema.at(i).clusterEnd+1;
+        int totalTarget=0;
+        int totalTargetInBound=0;
+       
+        for(int j = 0;j<baseInBound.size();j++){
+            for(int a = startID;a<endID-;a++){
+                if(baseInBound.at(j).time==clusteredDatapoints.at(a).time){
+                    totalTarget++;
+                    startID==a+;
+                    if(clusteredDatapoints.at(a+).change>=in->targetMinBound&&clusteredDatapoints.at(a+).change<=in->targetMinBound){
+                        totalTargetInBound++;
+                    }
+                }
+            }
+            
+        }
+        if(totalTarget==0) continue;
+        double zout = ((double)(totalTargetInBound/totalTarget)-in->likelihood)/sqrt((1-in->likelihood)*in->likelihood/totalTarget);
+        if(zout>0){
+            report newReport = *in;
+            newReport.target = finalTickerSchema.at(i);
+            newReport.totalTarget=totalTarget;
+            newReport.totalTargetInBound=totalTargetInBound;
+            newReport.zScore=zout;
+            out->push_back(newReport);
+        }
+    }
 
 }
 
@@ -848,10 +931,9 @@ int main(int argc,char** argv){
 
     MPI_Comm_rank(MPI_COMM_WORLD,&rank);
     MPI_Comm_size(MPI_COMM_WORLD,&size);
-    initializationClusterAndSort("../assets/TestData","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
-   
-    //initializationClusterAndSort("../assets/historical_daily_data_kaggle","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
-    //startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+    //initialization("../assets/TestData","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+    //initialization("../assets/historical_daily_data_kaggle","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+    startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
     MPI_Barrier(MPI_COMM_WORLD);
     log("creating test point");
     datapoint test;
