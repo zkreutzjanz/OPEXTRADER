@@ -1,4 +1,4 @@
-#include <mpi.h>
+
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
@@ -11,6 +11,7 @@
 #include <math.h>
 #include <algorithm>
 #include <sys/time.h>
+#include <mpi.h>
 
 
 //no
@@ -372,11 +373,19 @@ void declareDatatypes(){
 	int disps[] = {MPI_LONG_LONG,MPI_CHAR,MPI_LONG_LONG,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE};
 	MPI_Type_create_struct(6,lengths,types,disps,&datapointDatatype);
 	MPI_Type_commit(&datapointDatatype);
+
     int tlengths[] = {1,1,1,1,1};
 	MPI_Aint ttypes[] = {offsetof(ticker,id),offsetof(ticker,clusterStart),offsetof(ticker,clusterEnd),offsetof(ticker,mean),offsetof(ticker,std)};
 	int tdisps[] = {MPI_LONG_LONG,MPI_INT,MPI_INT,MPI_DOUBLE,MPI_DOUBLE};
 	MPI_Type_create_struct(5,tlengths,ttypes,tdisps,&tickerDatatype);
 	MPI_Type_commit(&tickerDatatype);
+
+    int rlengths[] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,};
+	MPI_Aint rtypes[] = {offsetof(report,base),offsetof(report,target),offsetof(report,baseMinBound),offsetof(report,baseMaxBound),offsetof(report,targetMinBound),offsetof(report,targetMaxBound),offsetof(report,timeMinBound),offsetof(report,timeMaxBound),offsetof(report,totalTarget),offsetof(report,totalTargetInBound),offsetof(report,totalBase),offsetof(report,totalBaseInBound),offsetof(report,likelihood),offsetof(report,zScore),offsetof(report,dayDifference)};
+	int rdisps[] = {tickerDatatype,tickerDatatype,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_LONG_LONG,MPI_LONG_LONG,MPI_INT,MPI_INT,MPI_INT,MPI_INT,MPI_DOUBLE,MPI_DOUBLE,MPI_INT};
+	MPI_Type_create_struct(15,rlengths,rtypes,rdisps,&reportDatatype);
+	MPI_Type_commit(&reportDatatype);
+
 }
 
 
@@ -572,6 +581,113 @@ void generateTickerSchema(std::vector<datapoint> *in,std::vector<ticker> *out){
     }
 }
 
+void generateReports(report *in,std::vector<report> *out,double zscoreCutoff){
+    std::vector<datapoint> baseInBound;
+    for(int i=in->base.clusterStart;i<in->base.clusterEnd+1;i++){
+        if(clusteredDatapoints.at(i).change<=in->baseMaxBound&&clusteredDatapoints.at(i).change>=in->baseMaxBound&&clusteredDatapoints.at(i).time<=in->timeMaxBound&&clusteredDatapoints.at(i).time>=in->timeMinBound){
+           baseInBound.push_back(clusteredDatapoints.at(i));
+        }
+    }
+    in->totalBase = in->base.clusterEnd-in->base.clusterStart +1;
+    in->totalBaseInBound = baseInBound.size();
+    for(ticker tickerTarget:finalTickerSchema){
+        if(tickerTarget.id==in->base.id) break;
+        int targetStart = tickerTarget.clusterStart;
+        int targetEnd = tickerTarget.clusterEnd+1;
+        int totalTarget=0;
+        int totalTargetInBound=0;
+       
+        for(datapoint base:baseInBound){
+            for(int targetID = targetStart;targetID<targetEnd-in->dayDifference;targetID++){
+                if(base.time==clusteredDatapoints.at(targetID).time){
+                    targetStart=targetID;
+                    totalTarget++;
+                    if(clusteredDatapoints.at(targetID+in->dayDifference).change>=in->targetMinBound&&clusteredDatapoints.at(targetID+in->dayDifference).change<=in->targetMinBound){
+                        totalTargetInBound++;
+                    }
+                    targetID=targetEnd;
+                }
+            }
+        }
+        if(totalTarget==0) continue;
+        double zout = ((double)(totalTargetInBound/totalTarget)-in->likelihood)/sqrt((1-in->likelihood)*in->likelihood/totalTarget);
+        if(zout>0){
+            report newReport = *in;
+            newReport.target = tickerTarget;
+            newReport.totalTarget=totalTarget;
+            newReport.totalTargetInBound=totalTargetInBound;
+            newReport.zScore=zout;
+            out->push_back(newReport);
+        }
+    }
+
+}
+
+
+
+double backtestStrategy(long long timeMinBound, long long timeTest,double zscoreCutoff,double targetMinBound, double targetMaxBound,int dayDifference,double requestMargin,double likelihood){
+    
+    log("backtestStrategy::Generating datapoint report requests from day");
+    std::vector<report> initialReportRequests;
+    for(datapoint d:clusteredDatapoints){
+        if(d.time==timeTest){
+            report temp;
+            for(ticker t:finalTickerSchema) if(t.id==d.id) temp.base=t;
+            temp.dayDifference=dayDifference;
+            temp.timeMinBound=timeMinBound;
+            temp.timeMaxBound=timeTest;
+            temp.targetMinBound=targetMinBound;
+            temp.targetMaxBound=targetMaxBound;
+            temp.likelihood=likelihood;
+            double percentile = getPercentile((d.change-temp.base.mean)/temp.base.std);
+            temp.baseMinBound= getZScore(percentile - requestMargin<0?0:percentile - requestMargin)*temp.base.std+temp.base.mean;
+            temp.baseMaxBound = getZScore(percentile + requestMargin>1?1:percentile + requestMargin)*temp.base.std+temp.base.mean;
+            initialReportRequests.push_back(temp);
+            
+        }
+    }
+     log("backtestStrategy::Generated datapoint report requests from day");
+
+    log("backtestStrategy::Generating Reports");
+    std::vector<report> localReportResponses;
+    for(int i = rank;i<initialReportRequests.size();i++){
+        generateReports(&initialReportRequests.at(i),&localReportResponses,zscoreCutoff);
+    }
+    log("backtestStrategy::Generated Reports");
+
+    log("backtestStrategy::Gathering Reports");
+    int localReportCount = localReportResponses.size();
+    std::vector<int> localReportCounts;
+    localReportCounts.resize(size);
+    MPI_Gather(&localReportCount,1,MPI_INT,&localReportCounts[0],size,MPI_INT,0,MPI_COMM_WORLD);
+    std::vector<int> localReportDispls;
+    localReportDispls.push_back(0);
+    int totalReports= rank==0?localReportCount:0;
+    for(int i=1;i<size;i++){
+        totalReports +=localReportCounts.at(i);
+        localReportDispls.push_back(localReportDispls.at(i-1)+localReportCounts.at(i-1));
+    }
+    std::vector<report> reportResponses;
+    reportResponses.resize(localReportCount);
+    MPI_Gatherv(&localReportResponses[0],localReportCount,reportDatatype,&reportResponses[0],&localReportCounts[0],&localReportDispls[0],reportDatatype,0,MPI_COMM_WORLD);
+    log("backtestStrategy::Gathered Reports");
+    
+    log("backtestStrategy::Computing proffitability");
+    double sumChange=0;
+    for(report r:reportResponses){
+        for(int i=r.target.clusterStart;i<r.target.clusterEnd+1-dayDifference;i++){
+            if(clusteredDatapoints.at(i).time==timeTest){
+                sumChange += clusteredDatapoints.at(i+dayDifference).change/(double)reportResponses.size();
+                log("backtestStrategy::Report <"+std::to_string(r.base.id)+"> on <"+std::to_string(r.target.id)+"> sumchange added");
+            }
+        }
+    }
+    log(sumChange);
+    log("backtestStrategy::Computed proffitability");
+    return sumChange;
+
+
+}
 
 void initialization(std::string inputFileName,std::string datapointsFileName, std::string tickerSchemasFileName){
 
@@ -813,50 +929,31 @@ void startup(std::string datapointFileName,std::string tickerSchemaFileName){
     log("startup::shared vectors");
 }
 
+void createSampleFile(std::string sourceFileName, std::string datapointDestFileName,std::string tickerDestFileName,int lines){
+    log("createSampleFile::Loading Source File to Datapoints Vector");
+    if(rank==0) loadFileToDataStructure(&sourceFileName,&clusteredDatapoints,&parseStorageLineToDataPoint);
+    log("createSampleFile::Loaded Source File to Datapoints Vector");
 
-void changeAnalysis(report *in,std::vector<report> *out){
-    std::vector<datapoint> baseInBound;
-    for(int i=in->base.clusterStart;i<in->base.clusterEnd+1;i++){
-        if(clusteredDatapoints.at(i).change<=in->baseMaxBound&&clusteredDatapoints.at(i).change>=in->baseMaxBound&&clusteredDatapoints.at(i).time<=in->timeMaxBound&&clusteredDatapoints.at(i).time>=in->timeMinBound){
-           baseInBound.push_back(clusteredDatapoints.at(i));
-        }
-    }
-    in->totalBase = in->base.clusterEnd-in->base.clusterStart +1;
-    in->totalBaseInBound = baseInBound.size();
-    for(int i =0;i<finalTickerSchema.size();i++){
-        if(finalTickerSchema.at(i).id==in->base.id) break;
-        int startID = finalTickerSchema.at(i).clusterStart;
-        int endID = finalTickerSchema.at(i).clusterEnd+1;
-        int totalTarget=0;
-        int totalTargetInBound=0;
-       
-        for(int j = 0;j<baseInBound.size();j++){
-            for(int a = startID;a<endID-;a++){
-                if(baseInBound.at(j).time==clusteredDatapoints.at(a).time){
-                    totalTarget++;
-                    startID==a+;
-                    if(clusteredDatapoints.at(a+).change>=in->targetMinBound&&clusteredDatapoints.at(a+).change<=in->targetMinBound){
-                        totalTargetInBound++;
-                    }
-                }
-            }
-            
-        }
-        if(totalTarget==0) continue;
-        double zout = ((double)(totalTargetInBound/totalTarget)-in->likelihood)/sqrt((1-in->likelihood)*in->likelihood/totalTarget);
-        if(zout>0){
-            report newReport = *in;
-            newReport.target = finalTickerSchema.at(i);
-            newReport.totalTarget=totalTarget;
-            newReport.totalTargetInBound=totalTargetInBound;
-            newReport.zScore=zout;
-            out->push_back(newReport);
-        }
-    }
+    log("createSampleFile::Resizing Datapoints Vector");
+    if(rank==0) clusteredDatapoints.resize(lines);
+    log("createSampleFile::Resized Datapoints Vector");
+
+    log("createSampleFile::Recreating Ticker Schema");
+    if(rank==0) identifyTickersFromDatapoints(&clusteredDatapoints,&finalTickerSchema);
+    log("createSampleFile::Recreated Ticker Schema");
+
+    log("createSampleFile::Loading Datapoints Vector to File");
+    loadDatastructsToFile(&datapointDestFileName,&clusteredDatapoints,&parseDataPointToStorageLine);
+    log("createSampleFile::Loaded Datapoints Vector to File");
+
+    log("createSampleFile::Loading ticker schemas Vector to File");
+    loadDatastructsToFile(&tickerDestFileName,&finalTickerSchema,&parseTickerToStorageLine);
+    log("createSampleFile::Loaded ticker schemas Vector to File");
 
 }
 
-void runNextDaySuggestions(ticker in,long long timebar,std::vector<ticker> *out,double inLowerBound,double inUpperBound,double targetMin,double targetMax){
+
+/**void runNextDaySuggestions(ticker in,long long timebar,std::vector<ticker> *out,double inLowerBound,double inUpperBound,double targetMin,double targetMax){
    
     std::vector<datapoint> datapointsInBound;
     for(int i=in.clusterStart;i<in.clusterEnd+1;i++){
@@ -917,11 +1014,8 @@ void backtestDatapoint(datapoint in,double percentileMargin,double targetMin,dou
    
     long long dayAfter  = (in.time-(9/24)*86400)%(7*86400)==0?(long long)in.time+86400*3:(long long)in.time+86400;
 
-}
+}**/
 
-void backtestGivenDay(){
-
-}
 
 
 
@@ -933,16 +1027,22 @@ int main(int argc,char** argv){
     MPI_Comm_size(MPI_COMM_WORLD,&size);
     //initialization("../assets/TestData","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
     //initialization("../assets/historical_daily_data_kaggle","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
-    startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+
+    //startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+
+    createSampleFile("../assets/datapointdeepstorage","../assets/sampledpfile","../assets/sampletickfile",1000000);
+    startup("../assets/sampledpfile","../assets/sampletickfile");
+    backtestStrategy(0,?,0.0,0,1,1,.05,.5);
     MPI_Barrier(MPI_COMM_WORLD);
-    log("creating test point");
+   /** log("creating test point");
     datapoint test;
     strcpy(test.name,"TSLA");
     test.change = .0389;
     for(int i =0;i<TICKER_NAME_LENGTH;i++) test.id |= (test.name[i] << (i*8));
     MPI_Barrier(MPI_COMM_WORLD);
     log("about to backtest");
-    //backtestDatapoint(test,.05,.0001,1);
+    //backtestDatapoint(test,.05,.0001,1);**/
+
     MPI_Finalize();
 
 }
