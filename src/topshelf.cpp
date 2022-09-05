@@ -527,33 +527,38 @@ float getPercentile(double z){
 
 //User Functions/Processes
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-double backtestStrategyOnTicker(ticker *in,long long timeTestStart,long long timeMinBound,long long timeMaxBound,double zscoreCutoff,double targetMinBound, double targetMaxBound,int dayDifference,double requestMargin,double likelihood){
+double backtestStrategyOnTickers(std::vector<ticker> *in,long long timeTestStart,long long timeMinBound,long long timeMaxBound,double zscoreCutoff,double targetMinBound, double targetMaxBound,int dayDifference,double requestMargin,double likelihood){
     
-    log("backtestStrategyOnTicker::Generating Report Requests");
+    log("backtestStrategyOnTickers::Generating Report Requests");
+    //O(datapointcount) time
     std::vector<report> initialReportRequests;
-    for(int i=in->clusterStart;i<in->clusterEnd+1;i++){
-        if(clusteredDatapoints.at(i).time>=timeTestStart){
-            report temp;
-            temp.base=*in;
-            temp.dayDifference=dayDifference;
-            temp.timeMinBound=timeMinBound;
-            temp.timeMaxBound=clusteredDatapoints.at(i).time;
-            temp.targetMinBound=targetMinBound;
-            temp.targetMaxBound=targetMaxBound;
-            temp.likelihood=likelihood;
-            double percentile = getPercentile((clusteredDatapoints.at(i).change-temp.base.mean)/temp.base.std);
-            temp.baseMinBound= getZScore((percentile - requestMargin)<0?.01:(percentile - requestMargin))*temp.base.std+temp.base.mean;
-            temp.baseMaxBound = getZScore((percentile + requestMargin)>1?.99:(percentile + requestMargin))*temp.base.std+temp.base.mean;
-            initialReportRequests.push_back(temp);
-        }  
+    for(ticker t:*in){
+        for(int i=t.clusterStart;i<t.clusterEnd+1;i++){
+            if(clusteredDatapoints.at(i).time>=timeTestStart&&clusteredDatapoints.at(i).time<=timeMaxBound){
+                report temp;
+                temp.base=t;
+                temp.dayDifference=dayDifference;
+                temp.timeMinBound=timeMinBound;
+                temp.timeMaxBound=clusteredDatapoints.at(i).time;
+                temp.targetMinBound=targetMinBound;
+                temp.targetMaxBound=targetMaxBound;
+                temp.likelihood=likelihood;
+                double percentile = getPercentile((clusteredDatapoints.at(i).change-temp.base.mean)/temp.base.std);
+                temp.baseMinBound= getZScore((percentile - requestMargin)<0?.01:(percentile - requestMargin))*temp.base.std+temp.base.mean;
+                temp.baseMaxBound = getZScore((percentile + requestMargin)>1?.99:(percentile + requestMargin))*temp.base.std+temp.base.mean;
+                initialReportRequests.push_back(temp);
+            }
+        }
     }
-    log("backtestStrategyOnTicker::Generated Report Requests");  
+    log("backtestStrategyOnTickers::Generated Report Requests");  
 
     MPI_Barrier(MPI_COMM_WORLD);
     
     log("backtestStrategyOnTicker::Generating Report Responses");//O(datapointcount^2/size)
     std::vector<report> localReportResponses;
-    for(int i = rank;i<initialReportRequests.size();i += size){
+    int defaultPartition = (initialReportRequests.size()<size)?1:initialReportRequests.size()/size;
+    int end =  (initialReportRequests.size()<size)||(rank+1==size)?initialReportRequests.size():(rank+1)*defaultPartition;
+    for(int i = rank*defaultPartition;i<end;i++){
         generateReports(&initialReportRequests.at(i),&localReportResponses,zscoreCutoff);
         log("Report Request Number <"+std::to_string(i)+"> processed");
     }
@@ -563,7 +568,6 @@ double backtestStrategyOnTicker(ticker *in,long long timeTestStart,long long tim
 
     log("backtestStrategy::Gathering Reports");
     int localReportCount = localReportResponses.size();
-    //log("local reports <"+std::to_string(localReportCount)+"> generated");
     std::vector<int> localReportCounts;
     localReportCounts.resize(size);
     MPI_Gather(&localReportCount,1,MPI_INT,&localReportCounts[0],1,MPI_INT,0,MPI_COMM_WORLD);
@@ -578,34 +582,77 @@ double backtestStrategyOnTicker(ticker *in,long long timeTestStart,long long tim
     reportResponses.resize(totalReports);
     MPI_Gatherv(&localReportResponses[0],localReportCount,reportDatatype,&reportResponses[0],&localReportCounts[0],&localReportDispls[0],reportDatatype,0,MPI_COMM_WORLD);
     log("backtestStrategy::Gathered Reports");
-
+ 
     MPI_Barrier(MPI_COMM_WORLD);
     if(rank==0) log("reports <"+std::to_string(reportResponses.size())+"> generated");
     MPI_Barrier(MPI_COMM_WORLD);
      
-    log("backtestStrategy::Computing proffitability"); 
-    double change=1;
+    log("backtestStrategy::Computing profitability"); 
+    double allTickerSum =0;
+    int allTickerCount=1;
+    long long currentTime=0;
+    long long currentTicker=0;
+    double singleTimeSum =0;
+    int singleTimeCount=1;
+    double singleTickerProduct=1;
     for(report r:reportResponses){
+        double change;
         for(int i=r.target.clusterStart;i<r.target.clusterEnd+1-dayDifference;i++){
             if(clusteredDatapoints.at(i).time==r.timeMaxBound){
-                change *=  (1+clusteredDatapoints.at(i+dayDifference).change);
-                r.responseVal = (1+clusteredDatapoints.at(i+dayDifference).change);
-                //log("Today <"+std::to_string(clusteredDatapoints.at(i+dayDifference).change)+"< Total <"+std::to_string(change)+">");
+                change= (1+clusteredDatapoints.at(i+dayDifference).change);
+                r.responseVal =change;
                 log("backtestStrategy::Report <"+(std::string)clusteredDatapoints.at(r.base.clusterStart).name+"> on <"+(std::string)clusteredDatapoints.at(r.target.clusterStart).name+"> sumchange <"+std::to_string(clusteredDatapoints.at(i+dayDifference).change)+"> added Currently at <"+std::to_string(change));
             }
         }
+        /**
+         * @brief 
+         * ticker1
+         *  timea
+         *   r1=.01 //allTickerSum =0;allTickerCount=1; currentTime=timea;currentTicker=ticker1;singleTimeSum =.01;singleTimeCount=1;singleTickerProduct=1;
+         *   r2=.01 //allTickerSum =0;allTickerCount=1; currentTime=timea;currentTicker=ticker1;singleTimeSum =.02;singleTimeCount=2;singleTickerProduct=1;
+         *  timeb
+         *   r1=.01 //allTickerSum =0;allTickerCount=1; currentTime=timeb;currentTicker=ticker1;singleTimeSum =.01;singleTimeCount=1;singleTickerProduct=1.01;
+         *   r2=.01 //allTickerSum =0;allTickerCount=1; currentTime=timeb;currentTicker=ticker1;singleTimeSum =.02;singleTimeCount=2;singleTickerProduct=1.01;
+         * ticker2
+         *  timea
+         *   r1=.01 //allTickerSum =1.0201;allTickerCount=2; currentTime=timea;currentTicker=ticker2;singleTimeSum =.01;singleTimeCount=1;singleTickerProduct=1;
+         *   r2=.01
+         *  timeb
+         *   r1=.01
+         *   r2=.01 //allTickerSum =1.201;allTickerCount=2; currentTime=timeb;currentTicker=ticker2;singleTimeSum =.02;singleTimeCount=2;singleTickerProduct=1.01;
+         */
+        if(r.base.id==currentTicker){
+            if(r.timeMaxBound==currentTime){
+                singleTimeSum +=change;
+                singleTimeCount++;
+            }else{
+                singleTickerProduct *= (1+singleTimeSum/(double)singleTimeCount);
+                log("Single Time Count <"+std::to_string(singleTimeCount)+">");
+                currentTime=r.targetMaxBound;
+                singleTimeSum = change;
+                singleTimeCount=1;
+            }
+        }else{
+            singleTickerProduct *= (1+singleTimeSum/(double)singleTimeCount);
+            allTickerSum += singleTickerProduct;
+            log("Single Ticker Product <"+std::to_string(singleTickerProduct)+">");
+            allTickerCount++;
+            singleTickerProduct=1;
+            singleTimeSum = change;
+            singleTimeCount=1;
+            currentTime=r.targetMaxBound;
+            currentTicker=r.base.id;
+        }
     }
-    log("backtestStrategy::Computed proffitability");
+    double output = (allTickerSum+singleTickerProduct*(1+singleTimeSum/(double)singleTimeCount))/allTickerCount;
+    log("backtestStrategy::Computed profitability");
 
     log("backtestStrategy::Saving Backtests to File");
     std::string filename = "../assets/reports";
     loadDatastructsToFile(&filename,&reportResponses,&parseReportToStorageLine);
     log("backtestStrategy::Saved Backtests to File");
     MPI_Barrier(MPI_COMM_WORLD);
-    return change;
-
-}
-report backtestStrategyOnDate(){
+    return output;
 
 }
 /**
@@ -946,9 +993,10 @@ int main(int argc,char** argv){
     //deleteDatapoint("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage",tick);
     //createSampleFile("../assets/datapointdeepstorage","../assets/sampledpfile","../assets/sampletickfile",1000000);
     //startup("../assets/sampledpfile","../assets/sampletickfile");
-    
-    ticker t = finalTickerSchema.at(1066);
-    double i  = backtestStrategyOnTicker(&t,clusteredDatapoints.at(t.clusterStart+5).time,0,clusteredDatapoints.at(t.clusterEnd-2).time,0,0,1,1,.05,.51);
+    std::vector<ticker> toTest;
+    toTest.push_back(finalTickerSchema.at(1065));
+    toTest.push_back(finalTickerSchema.at(1066));
+    double i  = backtestStrategyOnTickers(&toTest,clusteredDatapoints.at(toTest.at(0).clusterStart+5).time,0,clusteredDatapoints.at(toTest.at(0).clusterEnd-2).time,0,0,1,1,.05,.51);
     //double i = backtestStrategy(0,1534377600,0,0,1,1,.05,.51,"../assets/reports");
   
     log(std::to_string(i));
