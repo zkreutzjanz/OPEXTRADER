@@ -73,13 +73,17 @@ int size;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 #define LOG 1
 #define TIME 1
+std::vector<std::string> log_Header_Vector;
+std::string log_Header;
 /**
  * @brief For implicit compile time logging
  * 
  * @param message 
  */
 void log(std::string message){
+    #if LOG 
     std::string timestamp="";
+    #endif
     #if TIME
     struct timeval tp;
     gettimeofday(&tp,NULL);
@@ -95,6 +99,16 @@ void log(std::string message){
 	std::string output= "NODE: "+std::to_string(100+rank).substr(1,2)+timestamp+" LOG: "+message+"\n";
 	std::cout<<output;
 	#endif
+}
+
+void addHeader(std::string in){
+    log_Header_Vector.push_back(in);
+    log_Header += in;
+}
+
+void removeHeader(){
+    log_Header_Vector.pop_back();
+    for(std::string log_Header_Val:log_Header_Vector) log_Header += log_Header_Val;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -520,10 +534,101 @@ double getZScore (double p)
 }
 
 float getPercentile(double z){
-    return (1-erf(-(z)/ sqrt(2.0)))/2.0;
+    return (1.0-erf(-(z)/ sqrt(2.0)))/2.0;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
+
+
+void backtestDailyStrategy(report requestTemplate,long long startingTestDate,long longEndingTestDate,double dailyStrategy(report requestTemplate,long long testDate)){
+
+}
+
+
+double dayAfterIncStrategy(report requestTemplate,long long testDate,double zCutoff){
+    double requestMargin = .05;
+    
+    addHeader("dayAfterIncStrategy::");
+    long long previousDayDate =0;
+    bool found=false;
+    std::vector<report> requests;
+    for(ticker t:finalTickerSchema){
+        for(int i=t.clusterStart+requestTemplate.dayDifference;i<t.clusterEnd+1;i++){
+            if(clusteredDatapoints.at(i).time==testDate){
+                report newRequest = requestTemplate;
+                double percentile = getPercentile((clusteredDatapoints.at(i-requestTemplate.dayDifference).change-t.mean)/t.std);
+                newRequest.baseMinBound= getZScore((percentile - requestMargin)<0?.01:(percentile - requestMargin))*t.std+t.mean;
+                newRequest.baseMaxBound = getZScore((percentile + requestMargin)>1?.99:(percentile + requestMargin))*t.std+t.mean;
+                newRequest.base=t;
+                requests.push_back(newRequest);
+                break;
+            }
+        }
+    }
+
+    std::vector<report> localResponses;
+    int defaultPartition = (requests.size()<size)?1:requests.size()/size;
+    int end =  (requests.size()<size)||(rank+1==size)?requests.size():(rank+1)*defaultPartition;
+    for(int i = rank*defaultPartition;i<end;i++){
+        std::vector<datapoint> basesInBound;
+        requests.at(i).totalBase= requests.at(i).base.clusterEnd+1-requests.at(i).base.clusterStart;
+        for(int baseID = requests.at(i).base.clusterStart; baseID<requests.at(i).base.clusterEnd+1;baseID++){
+            if(clusteredDatapoints.at(baseID).time>=requests.at(i).timeMinBound
+             &&clusteredDatapoints.at(baseID).time<=requests.at(i).timeMaxBound
+             &&clusteredDatapoints.at(baseID).change>=requests.at(i).baseMinBound
+             &&clusteredDatapoints.at(baseID).change<=requests.at(i).baseMaxBound 
+            ){
+                basesInBound.push_back(clusteredDatapoints.at(baseID));
+            }
+        }
+        requests.at(i).totalBaseInBound=basesInBound.size();
+
+        for(ticker tt:finalTickerSchema){
+            int ttStart = tt.clusterStart;
+            report newResponse = requests.at(i);
+            for(datapoint bd:basesInBound){
+                for(int td=ttStart;td=tt.clusterEnd;td++){
+                    if(clusteredDatapoints.at(td).time==bd.time){
+                        if(clusteredDatapoints.at(td+1).time>requests.at(i).targetMaxBound) break;
+                        newResponse.totalTarget++;
+                        if(clusteredDatapoints.at(td).change>=requests.at(i).baseMinBound
+                         &&clusteredDatapoints.at(td).change<=requests.at(i).baseMaxBound
+                        ){
+                            newResponse.totalTargetInBound++;
+                        }
+                        ttStart=td+1;
+                        break;
+                    }
+                }
+            }
+            if(!requests.at(i).totalTarget) continue;
+            double zout = ((double)((double)requests.at(i).totalTargetInBound/(double)requests.at(i).totalTarget)-requests.at(i).likelihood)/sqrt((1-requests.at(i).likelihood)*requests.at(i).likelihood/requests.at(i).totalTarget);
+            if(zout<zCutoff) continue;
+            newResponse.target = tt;
+            newResponse.zScore=zout;
+            localResponses.push_back(newResponse);
+        }
+    }
+
+    
+
+
+
+    if(!found){
+        log("~~~ERROR::No times found with given testDate~~~");
+        return 0; 
+    } 
+    for(ticker t:finalTickerSchema){
+        for(int i=t.clusterStart;i<t.clusterEnd+1;i++){
+
+        }
+    }
+
+
+    removeHeader();
+}
+    
 
 //User Functions/Processes
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -589,21 +694,22 @@ double backtestStrategyOnTickers(std::vector<ticker> *in,long long timeTestStart
      
     log("backtestStrategy::Computing profitability"); 
     double allTickerSum =0;
-    int allTickerCount=1;
+    int allTickerCount=0;
     long long currentTime=0;
     long long currentTicker=0;
     double singleTimeSum =0;
     int singleTimeCount=1;
     double singleTickerProduct=1;
     for(report r:reportResponses){
-        double change;
+        double change=0;
         for(int i=r.target.clusterStart;i<r.target.clusterEnd+1-dayDifference;i++){
             if(clusteredDatapoints.at(i).time==r.timeMaxBound){
-                change= (1+clusteredDatapoints.at(i+dayDifference).change);
+                change= (clusteredDatapoints.at(i+dayDifference).change);
                 r.responseVal =change;
-                log("backtestStrategy::Report <"+(std::string)clusteredDatapoints.at(r.base.clusterStart).name+"> on <"+(std::string)clusteredDatapoints.at(r.target.clusterStart).name+"> sumchange <"+std::to_string(clusteredDatapoints.at(i+dayDifference).change)+"> added Currently at <"+std::to_string(change));
+                //log("backtestStrategy::Report <"+(std::string)clusteredDatapoints.at(r.base.clusterStart).name+"> on <"+(std::string)clusteredDatapoints.at(r.target.clusterStart).name+"> sumchange <"+std::to_string(clusteredDatapoints.at(i+dayDifference).change)+"> added Currently at <"+std::to_string(change));
             }
         }
+        
         /**
          * @brief 
          * ticker1
@@ -621,21 +727,22 @@ double backtestStrategyOnTickers(std::vector<ticker> *in,long long timeTestStart
          *   r1=.01
          *   r2=.01 //allTickerSum =1.201;allTickerCount=2; currentTime=timeb;currentTicker=ticker2;singleTimeSum =.02;singleTimeCount=2;singleTickerProduct=1.01;
          */
+        
         if(r.base.id==currentTicker){
             if(r.timeMaxBound==currentTime){
                 singleTimeSum +=change;
                 singleTimeCount++;
             }else{
                 singleTickerProduct *= (1+singleTimeSum/(double)singleTimeCount);
-                log("Single Time Count <"+std::to_string(singleTimeCount)+">");
+                //log("Single Time Count <"+std::to_string(singleTimeCount)+"> single time change <"+std::to_string((1+singleTimeSum/(double)singleTimeCount))+">");
                 currentTime=r.targetMaxBound;
                 singleTimeSum = change;
                 singleTimeCount=1;
             }
         }else{
             singleTickerProduct *= (1+singleTimeSum/(double)singleTimeCount);
-            allTickerSum += singleTickerProduct;
-            log("Single Ticker Product <"+std::to_string(singleTickerProduct)+">");
+            allTickerSum += singleTickerProduct-1;
+            log("Prev Ticker Product <"+std::to_string(singleTickerProduct)+"> current allticker sum <"+std::to_string(allTickerSum)+">");
             allTickerCount++;
             singleTickerProduct=1;
             singleTimeSum = change;
@@ -644,7 +751,11 @@ double backtestStrategyOnTickers(std::vector<ticker> *in,long long timeTestStart
             currentTicker=r.base.id;
         }
     }
-    double output = (allTickerSum+singleTickerProduct*(1+singleTimeSum/(double)singleTimeCount))/allTickerCount;
+    singleTickerProduct *= (1+singleTimeSum/(double)singleTimeCount);
+    allTickerSum += singleTickerProduct-1;
+    double output = allTickerSum/allTickerCount;
+
+    if(rank==0) log("Prev Ticker Product <"+std::to_string(singleTickerProduct)+"> current allticker sum <"+std::to_string(allTickerSum)+">");
     log("backtestStrategy::Computed profitability");
 
     log("backtestStrategy::Saving Backtests to File");
@@ -721,7 +832,7 @@ double backtestStrategy(std::vector<ticker> *tickersToTest,long long timeMinBoun
 
 }**/
 
-void initialization(std::string inputFileName,std::string datapointsFileName, std::string tickerSchemasFileName){
+void initialization(std::string inputFileName){
 
     std::vector<datapoint>().swap(clusteredDatapoints);
     std::vector<ticker>().swap(finalTickerSchema);
@@ -731,7 +842,7 @@ void initialization(std::string inputFileName,std::string datapointsFileName, st
     declareDatatypes();
     log("initialization::Declared Datatypes");
 
-
+//1535068800
     //Unknown BC IO
     log("initialization::Loading File to Datapoints Vector");
     std::vector<datapoint> unClusteredDatapoints;
@@ -848,8 +959,8 @@ void initialization(std::string inputFileName,std::string datapointsFileName, st
     //regather O(unkown)
     log("initialization::Regathering Datapoints");
     int localDatapointCount = localDatapoints.size();
-    std::vector<datapoint> finalDatapoints;
-    if(rank==0) finalDatapoints.resize(datapointCount);
+   
+    if(rank==0) clusteredDatapoints.resize(datapointCount);
     std::vector<int> datapointCounts;
     datapointCounts.resize(size);
     std::vector<int> datapointDispls;
@@ -858,7 +969,7 @@ void initialization(std::string inputFileName,std::string datapointsFileName, st
     for(int i=1;i<size;i++){
         if(rank==0) datapointDispls.push_back(datapointDispls.at(i-1)+datapointCounts.at(i-1));
     }
-    MPI_Gatherv(&localDatapoints[0],localDatapointCount,datapointDatatype,&finalDatapoints[0],&datapointCounts[0],&datapointDispls[0],datapointDatatype,0,MPI_COMM_WORLD);
+    MPI_Gatherv(&localDatapoints[0],localDatapointCount,datapointDatatype,&clusteredDatapoints[0],&datapointCounts[0],&datapointDispls[0],datapointDatatype,0,MPI_COMM_WORLD);
     std::vector<datapoint>().swap(localDatapoints);
     std::vector<datapoint>().swap(unClusteredDatapoints);
     log("initialization::Regathered Datapoints");
@@ -866,27 +977,12 @@ void initialization(std::string inputFileName,std::string datapointsFileName, st
 
 
     log("initialization::Generating Ticker Schema");
-    std::vector<ticker> finalTickers;
-    if(rank==0) generateTickerSchema(&finalDatapoints,&finalTickers);
+    if(rank==0) generateTickerSchema(&clusteredDatapoints,&finalTickerSchema);
     log("initialization::Generated Ticker Schema");
     
 
 
-    log("initialization::Loading Datapoints Vector to File");
-    loadDatastructsToFile(&datapointsFileName,&finalDatapoints,&parseDataPointToStorageLine);
-    log("initialization::Loaded Datapoints Vector to File");
-
-
-
-    log("initialization::Loading ticker schemas Vector to File");
-    loadDatastructsToFile(&tickerSchemasFileName,&finalTickers,&parseTickerToStorageLine);
-    log("initialization::Loaded ticker schemas Vector to File");
 }
-
-
-
-
-
 
 void startup(std::string datapointFileName,std::string tickerSchemaFileName){
 
@@ -910,65 +1006,86 @@ void startup(std::string datapointFileName,std::string tickerSchemaFileName){
     log("startup::shared vectors");
 }
 
-void createSampleFile(std::string sourceFileName, std::string datapointDestFileName,std::string tickerDestFileName,int lines){
-    log("createSampleFile::Loading Source File to Datapoints Vector");
-    if(rank==0) loadFileToDataStructure(&sourceFileName,&clusteredDatapoints,&parseStorageLineToDataPoint);
-    log("createSampleFile::Loaded Source File to Datapoints Vector");
+void pruneGlobalVectorsToGivenLength(std::string datapointFileName,std::string tickerFileName,int lines){
 
-    log("createSampleFile::Resizing Datapoints Vector");
-    if(rank==0) clusteredDatapoints.resize(lines);
-    log("createSampleFile::Resized Datapoints Vector");
+    log("pruneGlobalVectorsToGivenLength::Resizing Datapoints Vector");
+    clusteredDatapoints.resize(lines);
+    log("pruneGlobalVectorsToGivenLength::Resized Datapoints Vector");
 
-    log("createSampleFile::Recreating Ticker Schema");
-    if(rank==0) generateTickerSchema(&clusteredDatapoints,&finalTickerSchema);
-    log("createSampleFile::Recreated Ticker Schema");
-
-    log("createSampleFile::Loading Datapoints Vector to File");
-    loadDatastructsToFile(&datapointDestFileName,&clusteredDatapoints,&parseDataPointToStorageLine);
-    log("createSampleFile::Loaded Datapoints Vector to File");
-
-    log("createSampleFile::Loading ticker schemas Vector to File");
-    loadDatastructsToFile(&tickerDestFileName,&finalTickerSchema,&parseTickerToStorageLine);
-    log("createSampleFile::Loaded ticker schemas Vector to File");
-
-}
-
-void deleteDatapoint(std::string datapointFileName,std::string tickerFileName,char * datapointName){
-
-    std::vector<datapoint>().swap(clusteredDatapoints);
-    std::vector<ticker>().swap(finalTickerSchema);
-
-    log("deleteDatapoint::Loading Source File to Datapoints Vector");
-    if(rank==0) loadFileToDataStructure(&datapointFileName,&clusteredDatapoints,&parseStorageLineToDataPoint);
-    log("deleteDatapoint::Loaded Source File to Datapoints Vector");
-
-   /** log("deleteDatapoint::Deleting Values");
-    if(rank==0){
-        std::vector<datapoint>::iterator i = clusteredDatapoints.begin();
-        while (i != clusteredDatapoints.end())
-        {
-            if (!strcmp((i->name),datapointName))
-            {
-                clusteredDatapoints.erase(i);  // alternatively, i = items.erase(i);
+    log("pruneGlobalVectorsToGivenLength::Recreating Ticker Schema");
+    std::vector<ticker> newTickers;
+    for(int i=0;i<finalTickerSchema.size();i++){
+        if(finalTickerSchema.at(i).clusterEnd>=lines){
+            finalTickerSchema.at(i).clusterEnd=lines-1;
+            double meanSum=0;
+            for(int j = finalTickerSchema.at(i).clusterStart;j<finalTickerSchema.at(i).clusterEnd;j++) meanSum += clusteredDatapoints.at(j).change;
+            finalTickerSchema.at(i).mean = meanSum/finalTickerSchema.at(i).clusterEnd-finalTickerSchema.at(i).clusterStart;
+            double stdSum=0;
+            for(int j = finalTickerSchema.at(i).clusterStart;j<finalTickerSchema.at(i).clusterEnd;j++){
+                stdSum += (clusteredDatapoints.at(j).change-finalTickerSchema.at(i).mean)*(clusteredDatapoints.at(j).change-finalTickerSchema.at(i).mean);
+            
             }
-            std::advance(i,1);
+            finalTickerSchema.at(i).std= sqrt(stdSum/(double)(lines-finalTickerSchema.at(i).clusterStart));
+
+            break;
+        }else{
+            newTickers.push_back(finalTickerSchema.at(i));
         }
     }
-    log("deleteDatapoint::Deleted Values");**/
-
-    log("deleteDatapoint::Recreating Ticker Schema");
-    if(rank==0) generateTickerSchema(&clusteredDatapoints,&finalTickerSchema);
-    log("deleteDatapoint::Recreated Ticker Schema");
-
-    log("createSampleFile::Loading Datapoints Vector to File");
-    loadDatastructsToFile(&datapointFileName,&clusteredDatapoints,&parseDataPointToStorageLine);
-    log("createSampleFile::Loaded Datapoints Vector to File");
-
-    log("deleteDatapoint::Loading ticker schemas Vector to File");
-    loadDatastructsToFile(&tickerFileName,&finalTickerSchema,&parseTickerToStorageLine);
-    log("deleteDatapoint::Loaded ticker schemas Vector to File");
+    finalTickerSchema.swap(newTickers);
+    log("pruneGlobalVectorsToGivenLength::Recreated Ticker Schema");
 
 }
+
+void filterGlobalVectorsByGivenTickers(std::vector<std::string> filterTickers){
+
+    log("filterGlobalVectorsByGivenTickers::Populating New Datapoints and Ticker Vectors");
+    std::vector<datapoint> newDatapoints;
+    std::vector<ticker> newTickers;
+    for(std::string currentFilterTicker:filterTickers){
+        int myID=0;
+        int charsToPushFromTickerName = currentFilterTicker.size()>TICKER_NAME_LENGTH?TICKER_NAME_LENGTH:currentFilterTicker.size();
+        if(charsToPushFromTickerName){
+            char name[TICKER_NAME_LENGTH]={' '};
+            for(int i=0;i<charsToPushFromTickerName;i++) name[i] = currentFilterTicker.at(i);
+            for(int i =0;i<TICKER_NAME_LENGTH;i++) myID |= (name[i] << (i*8));
+        }
+        if(myID){
+            for(ticker currentTicker:finalTickerSchema){
+                if(currentTicker.id==myID){
+                    ticker newTicker = currentTicker;
+                    newTicker.clusterStart=newDatapoints.size();
+                    for(int i = currentTicker.clusterStart;i<currentTicker.clusterEnd+1;i++){
+                        newDatapoints.push_back(clusteredDatapoints.at(i));
+                    }
+                    newTicker.clusterEnd=newDatapoints.size()-1;
+                    newTickers.push_back(newTicker);
+                    break;
+                }
+            }
+        }
+    }
+    log("filterGlobalVectorsByGivenTickers::Populated New Datapoints and Ticker Vectors");
+
+    log("filterGlobalVectorsByGivenTickers::Setting Global Vectors to New Vectors");
+    clusteredDatapoints.swap(newDatapoints);
+    finalTickerSchema.swap(newTickers);
+    log("filterGlobalVectorsByGivenTickers::Set Global Vectors to New Vectors");
+
+}
+
+void writeGlobalVectorsToFiles(std::string datapointFileName,std::string tickerFileName){
+    log("writeGlobalVectorsToFiles::Loading Datapoints Vector to File");
+    loadDatastructsToFile(&datapointFileName,&clusteredDatapoints,&parseDataPointToStorageLine);
+    log("writeGlobalVectorsToFiles::Loaded Datapoints Vector to File");
+
+    log("writeGlobalVectorsToFiles::Loading ticker schemas Vector to File");
+    loadDatastructsToFile(&tickerFileName,&finalTickerSchema,&parseTickerToStorageLine);
+    log("writeGlobalVectorsToFiles::Loaded ticker schemas Vector to File");
+
+}
+
+
 
 
 
@@ -984,8 +1101,9 @@ int main(int argc,char** argv){
     MPI_Comm_rank(MPI_COMM_WORLD,&rank);
     MPI_Comm_size(MPI_COMM_WORLD,&size);
     //initialization("../assets/TestData","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
-    //initialization("../assets/historical_daily_data_kaggle","../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
-    startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+    initialization("../assets/historical_daily_data_kaggle");
+    writeGlobalVectorsToFiles("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+   // startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
     
     
     //MPI_Barrier(MPI_COMM_WORLD);
@@ -993,15 +1111,16 @@ int main(int argc,char** argv){
     //deleteDatapoint("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage",tick);
     //createSampleFile("../assets/datapointdeepstorage","../assets/sampledpfile","../assets/sampletickfile",1000000);
     //startup("../assets/sampledpfile","../assets/sampletickfile");
-    std::vector<ticker> toTest;
-    toTest.push_back(finalTickerSchema.at(1065));
-    toTest.push_back(finalTickerSchema.at(1066));
-    double i  = backtestStrategyOnTickers(&toTest,clusteredDatapoints.at(toTest.at(0).clusterStart+5).time,0,clusteredDatapoints.at(toTest.at(0).clusterEnd-2).time,0,0,1,1,.05,.51);
+   // std::vector<ticker> toTest;
+   // toTest.push_back(finalTickerSchema.at(5));
+    
+   // toTest.push_back(finalTickerSchema.at(8));
+   // double i  = backtestStrategyOnTickers(&toTest,clusteredDatapoints.at(toTest.at(0).clusterStart+5).time,0,clusteredDatapoints.at(toTest.at(0).clusterEnd-2).time,0.0,0,1,1,.05,.51);
     //double i = backtestStrategy(0,1534377600,0,0,1,1,.05,.51,"../assets/reports");
   
-    log(std::to_string(i));
+   // log(std::to_string(i));
     datapoint test;
-    test.change=i;
+   // test.change=i;
     test.close=0;
     test.open=0;
     test.id=0;
@@ -1010,7 +1129,7 @@ int main(int argc,char** argv){
     std::vector<datapoint> towrite;
     towrite.push_back(test);
     std::string filename = "../assets/output";
-    loadDatastructsToFile(&filename,&towrite,&parseDataPointToStorageLine);
+   // loadDatastructsToFile(&filename,&towrite,&parseDataPointToStorageLine);
     MPI_Barrier(MPI_COMM_WORLD);
    /** log("creating test point");
     datapoint test;
