@@ -18,6 +18,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 const int TICKER_NAME_LENGTH =8;
 const int LINE_LOG_LENGTH=100000;
+const long long DAY_VALUE =0;
 struct datapoint{
     unsigned long long id=0;
     char name[TICKER_NAME_LENGTH]={' '};
@@ -35,7 +36,7 @@ struct ticker{
     double std;
 };
 MPI_Datatype tickerDatatype;
-struct report{
+struct dayAfterIncStrategyData{
     ticker base;
     ticker target;
     double baseMinBound;
@@ -53,7 +54,7 @@ struct report{
     int dayDifference;
     double responseVal;
 };
-MPI_Datatype reportDatatype;
+MPI_Datatype dayAfterIncStrategyDatatype;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -104,10 +105,12 @@ void log(std::string message){
 void addHeader(std::string in){
     log_Header_Vector.push_back(in);
     log_Header += in;
+    log("~~START~~");
 }
 
-void removeHeader(){
+void removeHeader(std::string garbage){
     log_Header_Vector.pop_back();
+    log("~~END~~");
     for(std::string log_Header_Val:log_Header_Vector) log_Header += log_Header_Val;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -264,7 +267,7 @@ void parseTickerToStorageLine(ticker *in,std::string delimiter,std::string *out)
  * @param delimiter the string delimiter
  * @return std::string output line
  */
-void parseReportToStorageLine(report *in,std::string delimiter,std::string *out){
+void parseReportToStorageLine(dayAfterStrategyType *in,std::string delimiter,std::string *out){
     out->append(std::to_string(in->base.id)+delimiter+std::to_string(in->target.id)+delimiter+std::to_string(in->baseMinBound)+delimiter+std::to_string(in->baseMaxBound)+delimiter+std::to_string(in->targetMinBound)+delimiter+std::to_string(in->targetMaxBound)+delimiter+std::to_string(in->timeMinBound)+delimiter+std::to_string(in->timeMaxBound)+delimiter+std::to_string(in->totalTarget)+delimiter+std::to_string(in->totalTargetInBound)+delimiter+std::to_string(in->totalBase)+delimiter+std::to_string(in->totalBaseInBound)+delimiter+std::to_string(in->dayDifference)+delimiter+std::to_string(in->likelihood)+delimiter+std::to_string(in->zScore)+delimiter+std::to_string(in->responseVal)+"\n");
 }
 /**
@@ -363,10 +366,10 @@ void declareDatatypes(){
 	MPI_Type_commit(&tickerDatatype);
 
     int rlengths[] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-	MPI_Aint rdisps[] = {offsetof(report,base),offsetof(report,target),offsetof(report,baseMinBound),offsetof(report,baseMaxBound),offsetof(report,targetMinBound),offsetof(report,targetMaxBound),offsetof(report,timeMinBound),offsetof(report,timeMaxBound),offsetof(report,totalTarget),offsetof(report,totalTargetInBound),offsetof(report,totalBase),offsetof(report,totalBaseInBound),offsetof(report,likelihood),offsetof(report,zScore),offsetof(report,dayDifference),offsetof(report,responseVal)};
+	MPI_Aint rdisps[] = {offsetof(dayAfterIncStrategyData,base),offsetof(dayAfterIncStrategyData,target),offsetof(dayAfterIncStrategyData,baseMinBound),offsetof(dayAfterIncStrategyData,baseMaxBound),offsetof(dayAfterIncStrategyData,targetMinBound),offsetof(dayAfterIncStrategyData,targetMaxBound),offsetof(dayAfterIncStrategyData,timeMinBound),offsetof(dayAfterIncStrategyData,timeMaxBound),offsetof(dayAfterIncStrategyData,totalTarget),offsetof(dayAfterIncStrategyData,totalTargetInBound),offsetof(dayAfterIncStrategyData,totalBase),offsetof(dayAfterIncStrategyData,totalBaseInBound),offsetof(dayAfterIncStrategyData,likelihood),offsetof(dayAfterIncStrategyData,zScore),offsetof(dayAfterIncStrategyData,dayDifference),offsetof(dayAfterIncStrategyData,responseVal)};
 	MPI_Datatype rtypes[] = {tickerDatatype,tickerDatatype,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_LONG_LONG,MPI_LONG_LONG,MPI_INT,MPI_INT,MPI_INT,MPI_INT,MPI_DOUBLE,MPI_DOUBLE,MPI_INT,MPI_DOUBLE};
-	MPI_Type_create_struct(16,rlengths,rdisps,rtypes,&reportDatatype);
-	MPI_Type_commit(&reportDatatype);
+	MPI_Type_create_struct(16,rlengths,rdisps,rtypes,&dayAfterIncStrategyDatatype);
+	MPI_Type_commit(&dayAfterIncStrategyDatatype);
 
 }
 void shareDatapoints(){
@@ -467,7 +470,7 @@ void generateReports(report *in,std::vector<report> *out,double zscoreCutoff){
         //log("zscore"+std::to_string(zout));
         if(zout>zscoreCutoff){
             //log("generateReports:: Base <"+(std::string)baseInBound.at(0).name+"> Target <"+(std::string)clusteredDatapoints.at(tickerTarget.clusterStart).name+"> InBound <"+std::to_string(totalTargetInBound)+"> Total <"+std::to_string(totalTarget)+"> Z <"+std::to_string(zout)+">");
-            report newReport = *in;
+            dayAfterStrategyType newReport = *in;
             newReport.target = tickerTarget;
             newReport.totalTarget=totalTarget;
             newReport.totalTargetInBound=totalTargetInBound;
@@ -540,23 +543,27 @@ float getPercentile(double z){
 
 
 
-
-void backtestDailyStrategy(report requestTemplate,long long startingTestDate,long longEndingTestDate,double dailyStrategy(report requestTemplate,long long testDate)){
-
+template<typename T>
+double backtestDailyInvestmentStrategy(T requestTemplate,long long startingTestDate,long longEndingTestDate,double zCutoff,double dailyStrategy(T,long long,double)){
+    double profit=1;
+    for(long long i=startingTestDate;i<=longEndingTestDate;i+=DAY_VALUE){
+        requestTemplate.timeMaxBound=i;
+        profit *= (1.0+dailyStrategy(requestTemplate,i,zCutoff));
+    }
+    return profit;
 }
 
-
-double dayAfterIncStrategy(report requestTemplate,long long testDate,double zCutoff){
+double dayAfterIncStrategy(dayAfterIncStrategyData requestTemplate,long long testDate,double zCutoff){
     double requestMargin = .05;
-    
     addHeader("dayAfterIncStrategy::");
-    long long previousDayDate =0;
-    bool found=false;
-    std::vector<report> requests;
+    requestTemplate.timeMaxBound=testDate;
+
+    addHeader("generatingReportRequests::");
+    std::vector<dayAfterStrategyType> requests;
     for(ticker t:finalTickerSchema){
         for(int i=t.clusterStart+requestTemplate.dayDifference;i<t.clusterEnd+1;i++){
             if(clusteredDatapoints.at(i).time==testDate){
-                report newRequest = requestTemplate;
+                dayAfterStrategyType newRequest = requestTemplate;
                 double percentile = getPercentile((clusteredDatapoints.at(i-requestTemplate.dayDifference).change-t.mean)/t.std);
                 newRequest.baseMinBound= getZScore((percentile - requestMargin)<0?.01:(percentile - requestMargin))*t.std+t.mean;
                 newRequest.baseMaxBound = getZScore((percentile + requestMargin)>1?.99:(percentile + requestMargin))*t.std+t.mean;
@@ -566,16 +573,21 @@ double dayAfterIncStrategy(report requestTemplate,long long testDate,double zCut
             }
         }
     }
+    log("Generated <"+std::to_string(requests.size())+"> Requests");
+    removeHeader("generatingReportRequests::");
 
-    std::vector<report> localResponses;
+
+    addHeader("generatingReportResponses::");
+    std::vector<dayAfterStrategyType> localResponses;
     int defaultPartition = (requests.size()<size)?1:requests.size()/size;
     int end =  (requests.size()<size)||(rank+1==size)?requests.size():(rank+1)*defaultPartition;
+    log("Report responses from <"+std::to_string(rank*defaultPartition)+"> to <"+std::to_string(end)+">");
     for(int i = rank*defaultPartition;i<end;i++){
         std::vector<datapoint> basesInBound;
         requests.at(i).totalBase= requests.at(i).base.clusterEnd+1-requests.at(i).base.clusterStart;
         for(int baseID = requests.at(i).base.clusterStart; baseID<requests.at(i).base.clusterEnd+1;baseID++){
             if(clusteredDatapoints.at(baseID).time>=requests.at(i).timeMinBound
-             &&clusteredDatapoints.at(baseID).time<=requests.at(i).timeMaxBound
+             &&clusteredDatapoints.at(baseID).time<requests.at(i).timeMaxBound
              &&clusteredDatapoints.at(baseID).change>=requests.at(i).baseMinBound
              &&clusteredDatapoints.at(baseID).change<=requests.at(i).baseMaxBound 
             ){
@@ -586,9 +598,11 @@ double dayAfterIncStrategy(report requestTemplate,long long testDate,double zCut
 
         for(ticker tt:finalTickerSchema){
             int ttStart = tt.clusterStart;
-            report newResponse = requests.at(i);
+            dayAfterStrategyType newResponse = requests.at(i);
+            newResponse.totalTarget=0;
+            newResponse.totalTargetInBound=0;
             for(datapoint bd:basesInBound){
-                for(int td=ttStart;td=tt.clusterEnd;td++){
+                for(int td=ttStart;td<tt.clusterEnd;td++){
                     if(clusteredDatapoints.at(td).time==bd.time){
                         if(clusteredDatapoints.at(td+1).time>requests.at(i).targetMaxBound) break;
                         newResponse.totalTarget++;
@@ -607,29 +621,41 @@ double dayAfterIncStrategy(report requestTemplate,long long testDate,double zCut
             if(zout<zCutoff) continue;
             newResponse.target = tt;
             newResponse.zScore=zout;
+            for(int td=tt.clusterStart;td<tt.clusterEnd+1;td++){
+                if(clusteredDatapoints.at(td).time==testDate) newResponse.responseVal=clusteredDatapoints.at(td).change;
+            }
+            log("New Response: <"+newResponse.)
             localResponses.push_back(newResponse);
         }
     }
-
+    removeHeader("generatingReportResponses::");
     
-
-
-
-    if(!found){
-        log("~~~ERROR::No times found with given testDate~~~");
-        return 0; 
-    } 
-    for(ticker t:finalTickerSchema){
-        for(int i=t.clusterStart;i<t.clusterEnd+1;i++){
-
-        }
+    addHeader("gatheringReports::");
+    std::vector<dayAfterStrategyType> responses;
+    int localReportCount = localReportResponses.size();
+    std::vector<int> localReportCounts;
+    localReportCounts.resize(size);
+    MPI_Gather(&localReportCount,1,MPI_INT,&localReportCounts[0],1,MPI_INT,0,MPI_COMM_WORLD);
+    std::vector<int> localReportDispls;
+    localReportDispls.push_back(0);
+    int totalReports= rank==0?localReportCounts.at(0):0;
+    for(int i=1;i<size;i++){
+        totalReports += localReportCounts.at(i);
+        localReportDispls.push_back(localReportDispls.at(i-1)+localReportCounts.at(i-1));
     }
+    responses.resize(totalReports);
+    MPI_Gatherv(&localReportResponses[0],localReportCount,dayAfterIncStrategyDatatype,&responses[0],&localReportCounts[0],&localReportDispls[0],dayAfterStrategyTypeDatatype,0,MPI_COMM_WORLD);
+    removeHeader("gatheringReports::");
 
+    addHeader("combiningReports::");
+    double sum=0;
+    for(dayAfterIncStrategyData r:responses) sum+=r.responseVal;
+    removeHeader("combiningreports::");
 
-    removeHeader();
+    removeHeader("dayAfterIncStrategy::");
+    return sum/(double)responses.size();
 }
     
-
 //User Functions/Processes
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 double backtestStrategyOnTickers(std::vector<ticker> *in,long long timeTestStart,long long timeMinBound,long long timeMaxBound,double zscoreCutoff,double targetMinBound, double targetMaxBound,int dayDifference,double requestMargin,double likelihood){
