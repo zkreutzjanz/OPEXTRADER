@@ -525,7 +525,7 @@ float getPercentile(double z){
     return (1.0-erf(-(z)/ sqrt(2.0)))/2.0;
 }
 
-double dayAfterIncStrategy(dayAfterIncStrategyData requestTemplate,long long testDate,double zCutoff){
+double dayAfterIncStrategy(dayAfterIncStrategyData requestTemplate,std::vector<dayAfterIncStrategyData> *responseData,long long testDate,double zCutoff){
     double requestMargin = .025;
     requestTemplate.timeMaxBound=testDate;
     addHeader("generatingReportRequests::");
@@ -616,7 +616,6 @@ double dayAfterIncStrategy(dayAfterIncStrategyData requestTemplate,long long tes
     MPI_Barrier(MPI_COMM_WORLD);
 
     addHeader("gatheringReports::");
-    std::vector<dayAfterIncStrategyData> responses;
     int localReportCount = localResponses.size();
     std::vector<int> localReportCounts;
     localReportCounts.resize(size);
@@ -628,37 +627,57 @@ double dayAfterIncStrategy(dayAfterIncStrategyData requestTemplate,long long tes
         totalReports += localReportCounts.at(i);
         localReportDispls.push_back(localReportDispls.at(i-1)+localReportCounts.at(i-1));
     }
-    responses.resize(totalReports);
-    MPI_Gatherv(&localResponses[0],localReportCount,dayAfterIncStrategyDatatype,&responses[0],&localReportCounts[0],&localReportDispls[0],dayAfterIncStrategyDatatype,0,MPI_COMM_WORLD);
+    responseData->resize(totalReports);
+    MPI_Gatherv(&localResponses[0],localReportCount,dayAfterIncStrategyDatatype,(&responseData[0]),&localReportCounts[0],&localReportDispls[0],dayAfterIncStrategyDatatype,0,MPI_COMM_WORLD);
     MPI_Barrier(MPI_COMM_WORLD);
     removeHeader("gatheringReports::");
-
+    
     addHeader("combiningReports::");
     double sum=0;
-    for(dayAfterIncStrategyData r:responses) sum+=r.responseVal;
+    for(dayAfterIncStrategyData r:*responseData) sum+=r.responseVal;
     removeHeader("combiningreports::");
+
     
-    return responses.size()?sum/(double)responses.size():0;
+    return responseData->size()?sum/(double)responseData->size():0;
+}
+
+double pureInvestmentStrategy(dayAfterIncStrategyData requestTemplate,std::vector<dayAfterIncStrategyData> *responseData,long long testDate,double zCutoff){
+    double changeSum=0;
+    double changeCount=0;
+    for(ticker t:finalTickerSchema){
+        for(int i = t.clusterStart;i<t.clusterEnd+1;i++){
+            if(clusteredDatapoints.at(i).time==testDate){
+                changeSum += clusteredDatapoints.at(i).change;
+                changeCount++;
+                break;
+            }
+        }
+    }
+    if(!changeCount) return 0;
+    return changeSum/(double)changeCount;
 }
 
 template<typename T>
-double backtestDailyInvestmentStrategy(T requestTemplate,std::vector<std::string> *results, long long startingTestDate,long longEndingTestDate,double zCutoff,double dailyStrategy(T,long long,double)){
+double backtestDailyInvestmentStrategy(T requestTemplate,std::vector<std::string> *results, long long startingTestDate,long longEndingTestDate,double zCutoff,double dailyStrategy(T,std::vector<T> *,long long,double)){
     double profit=1;
-    
     for(long long i=startingTestDate;i<=longEndingTestDate;i+=DAY_VALUE){
+        addHeader("backtestStrategy::");
         requestTemplate.timeMaxBound=i;
-        MPI_Barrier(MPI_COMM_WORLD);
-        addHeader("strategy::");
-        logger("One Date <"+std::to_string(i)+">");
-        MPI_Barrier(MPI_COMM_WORLD);
         double dailyProfit = dailyStrategy(requestTemplate,i,zCutoff);
-        
         profit *= (1.0+dailyProfit);
         if(dailyProfit!=0) results->push_back(std::to_string(i)+";"+std::to_string(dailyProfit)+";"+std::to_string(profit));
-        MPI_Barrier(MPI_COMM_WORLD);
         removeHeader();
     }
     return profit;
+}
+
+template<typename T>
+std::vector<T> runDailyInvestmentStrategy(T requestTemplate,long long testDate,double zCutoff,double dailyStrategy(T,std::vector<T> *,long long,double)){
+    std::vector<T> out;
+    addHeader("runStrategy");
+    dailyStrategy(requestTemplate,&out,i,zCutoff);
+    removeHeader();
+    return out;
 }
 
 void initialization(std::string inputFileName){
@@ -940,29 +959,58 @@ int main(int argc,char** argv){
     writeGlobalVectorsToFiles("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
     removeHeader();
 **/
-    startup("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
-    //startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+
+
+    //run this when you get home
+    addHeader("startup::");
+    startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+    removeHeader();
+
+    addHeader("filterInitVectors::");
+    std::vector<std::string> in = {"KR","PG","AAPL","KO","MSFT"};
+    filterGlobalVectorsByGivenTickers(in);
+    removeHeader();
+
+    addHeader("writeFilteredVectorsToFiles::");
+    writeGlobalVectorsToFiles("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
+    removeHeader();
+
     addHeader("dayAfterIncStrategy::");
     dayAfterIncStrategyData strat = {
         .targetMinBound=.0,
         .targetMaxBound=5,
         .timeMinBound=clusteredDatapoints.at(0).time,
-        .timeMaxBound=clusteredDatapoints.at(clusteredDatapoints.size()-100).time,
         .likelihood = .51,
         .dayDifference=1
     };
-    std::vector<std::string> results;
-   // for(int i=2000;i>0;i--){
+    std::vector<std::string> profitResults;
+    backtestDailyInvestmentStrategy(strat,&profitResults,clusteredDatapoints.at(clusteredDatapoints.size()-2000).time,clusteredDatapoints.at(clusteredDatapoints.size()-1).time,1.64,&dayAfterIncStrategy);
+    std::vector<dayAfterIncStrategyData> out= runDailyInvestmentStrategy(strat,clusteredDatapoints.at(clusteredDatapoints.size()-1).time+DAY_VALUE,1.64,&dayAfterIncStrategy);
+    removeHeader();
+
+    addHeader("writeResultsTofile");
+    std::string fileName= "../assets/results";
+    loadDatastructsToFile(&fileName,&out,&parseReportToStorageLine);
+    std::string fileNameProfit= "../assets/profitResults";
+    loadDatastructsToFile(&fileNameProfit,&profitResults,&parseStringToStorageLine);
+    removeHeader();
+
+
+    //startup("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
+    //startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
+    
+/**
         double out = (backtestDailyInvestmentStrategy(strat,&results,clusteredDatapoints.at(clusteredDatapoints.size()-2000).time,clusteredDatapoints.at(clusteredDatapoints.size()-1).time,1.64,&dayAfterIncStrategy));
         std::cout<<std::to_string(out)<<"\n";
-        /**if(rank==0){
+        if(rank==0){
             std::string toshow = std::to_string(i)+";"+std::to_string(clusteredDatapoints.at(clusteredDatapoints.size()-i).time)+";"+std::to_string(out);
              std::cout<<toshow<<"\n";
              results.push_back(toshow);
         }
-    }**/
+    }
+
     std::string fileName= "../assets/results";
-    loadDatastructsToFile(&fileName,&results,&parseStringToStorageLine);
+    loadDatastructsToFile(&fileName,&results,&parseStringToStorageLine);**/
     
    
 
