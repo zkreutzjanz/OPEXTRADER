@@ -723,25 +723,92 @@ double longTermInvestmentStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData r
 
 template<typename T>
 double backtestDailyInvestmentStrategy(int MULTITHREAD_MODE,T requestTemplate,std::vector<std::string> *results, long long startingTestDate,long long endingTestDate,double zCutoff,double dailyStrategy(int,T,std::vector<T> *,long long,double)){
-    double profit=1;
-    if(MULTITHREAD_MODE=MULTITHREAD_PARENT_OFF){
-        int daysTested = (endingTestDate-startingTestDate+DAY_VALUE)/DAY_VALUE;
-    }else{
 
+    /**
+     * @brief The identifyStrategyResponsibiliy
+     * Decides which child strategies are multithreaded, or if multithread goes on here
+     */
+    addHeader("identifyStrategyResponsibility");
+    long long childMultithreadableStart=0;
+    long long childMultithreadableEnd=0;
+    long long localStart=0;
+    long long localEnd=0;
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        long long daysTested = (endingTestDate-startingTestDate+DAY_VALUE)/DAY_VALUE;
+        if(daysTested<size){
+            childMultithreadableStart=startingTestDate;
+            childMultithreadableEnd=endingTestDate;
+        }else{
+            long long partition =(endingTestDate-startingTestDate+DAY_VALUE)/size;
+            localStart=partition*rank;
+            localEnd= partition*(rank+1);
+            childMultithreadableStart=partition*(rank+1);
+            childMultithreadableEnd=endingTestDate;
+        }
+    }else{
+        childMultithreadableStart=startingTestDate;
+        childMultithreadableEnd=endingTestDate;
+        MODE=MULTITHREAD_PARENT_ON;
     }
-    addHeader("backtestStrategy::");
-   // if(MODE==MULTITHREAD_SELF_OFF){
-        for(long long i=startingTestDate;i<=EndingTestDate;i+=DAY_VALUE){
-            requestTemplate.timeMaxBound=i;
-            std::vector<T> garbage;
-            double dailyProfit = dailyStrategy(requestTemplate,&garbage,i,zCutoff);
-            profit *= (1.0+dailyProfit);
-            if(dailyProfit!=0) results->push_back(std::to_string(i)+";"+std::to_string(dailyProfit)+";"+std::to_string(profit));
-      }
-    //}else if(MODE==MULTITHREAD_SELF_ON){
-        
-   // }
-    removeHeader();
+    removeHeader("identifyStrategyResponsibility");
+
+    /**
+     * @brief findLocallyComputedDailyStrategyProfits
+     * adds all the locally computed profits to a localprofitvector
+     */
+    addHeader("findLocallyComputedDailyStrategyProfits");
+    std::vector<double> localProfits;
+    for(int i =localStart;i<localEnd;i+=DAY_VALUE){
+        requestTemplate.timeMaxBound=i;
+        std::vector<T> garbage;
+        localProfits.push_back(dailyStrategy(MULTITHREAD_PARENT_ON,requestTemplate,&garbage,i,zCutoff));
+    }
+    removeHeader("findLocallyComputedDailyStrategyProfits");
+
+     /**
+     * @brief combineLocalProfitVectors
+     * If it is multithreaded, combines all local vectors
+     * otherwise just copies local vector over
+     */
+    addHeader("combineLocalProfitVectors::");
+    std::vector<dayAfterIncStrategyData> profits;
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        int localProfitCount = localProfits.size();
+        std::vector<int> localProfitCounts;
+        localProfitCounts.resize(size);
+        MPI_Gather(&localProfitCount,1,MPI_INT,&localProfitCounts[0],1,MPI_INT,0,MPI_COMM_WORLD);
+        std::vector<int> localProfitDispls;
+        localProfitDispls.push_back(0);
+        int totalProfits= rank==0?localProfitCounts.at(0):0;
+        for(int i=1;i<size;i++){
+            if(rank==0) totalProfits += localProfitCounts.at(i);
+            localProfitDispls.push_back(localProfitDispls.at(i-1)+localProfitCounts.at(i-1));
+        }
+        profits.resize(totalProfits);
+        MPI_Gatherv(&localProfits[0],localProfitCount,MPI_DOUBLE,(&profits[0]),&localProfitCounts[0],&localProfitDispls[0],MPI_DOUBLE,0,MPI_COMM_WORLD);
+    }else{
+        profits= localProfits;
+    }
+    removeHeader("combineLocalProfitVectors::");
+
+    
+
+     /**
+     * @brief findGloballyComputedDailyStrategyProfits
+     * adds all the globally computed profits to the profit vector
+     */
+    addHeader("findGloballyComputedDailyStrategyProfits");
+    for(long long i=childMultithreadableStart;i<=childMultithreadableEnd;i+=DAY_VALUE){
+        requestTemplate.timeMaxBound=i;
+        std::vector<T> garbage;
+        profits.push_back(dailyStrategy(MODE,requestTemplate,&garbage,i,zCutoff));
+    }
+    removeHeader("findGloballyComputedDailyStrategyProfits");
+    double profit =1.0;
+    for(double p:profits){
+        if(p>0) results->push_back(std::to_string(p));
+        profit*=(1+p);
+    }
     return profit;
 }
 
@@ -1061,7 +1128,7 @@ int main(int argc,char** argv){
     };
     std::vector<std::string> results;
     std::vector<std::string> garbage;
-    double normalProfit = backtestDailyInvestmentStrategy(strat,&garbage,globalDatapoints.at(globalDatapoints.size()-350).time,globalDatapoints.at(globalDatapoints.size()-100).time,0,&longTermInvestmentStrategy);
+    double normalProfit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&garbage,globalDatapoints.at(globalDatapoints.size()-350).time,globalDatapoints.at(globalDatapoints.size()-100).time,0,&longTermInvestmentStrategy);
             
     for(double z = 0;z<=10;z+=.5){
         //if(rank==0) logger(z);
@@ -1069,7 +1136,7 @@ int main(int argc,char** argv){
             //if(rank==0) logger(likely);
             std::vector<std::string> profitResults;
             strat.likelihood = likely;
-            double profit = backtestDailyInvestmentStrategy(strat,&profitResults,globalDatapoints.at(globalDatapoints.size()-350).time,globalDatapoints.at(globalDatapoints.size()-100).time,z,&dayAfterIncStrategy);
+            double profit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&profitResults,globalDatapoints.at(globalDatapoints.size()-350).time,globalDatapoints.at(globalDatapoints.size()-100).time,z,&dayAfterIncStrategy);
             std::string me =std::to_string(z)+";"+std::to_string(likely)+";"+std::to_string((profit/normalProfit)-1)+";"+std::to_string(profit)+";"+std::to_string(normalProfit);
             results.push_back(me);
             

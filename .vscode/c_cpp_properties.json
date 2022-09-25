@@ -1,6 +1,6 @@
 {
     "configurations": [
-        {
+       /** {
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
@@ -11,6 +11,18 @@
             "cStandard": "gnu17",
             "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64"
+        },**/
+        {
+            "name": "Win64",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "C:/Program Files (x86)/Microsoft SDKs/MPI/Include"
+            ],
+            "defines": [],
+            "compilerPath": "C:\\msys64\\mingw64\\bin\\g++.exe",
+            "cStandard": "gnu17",
+            "cppStandard": "gnu++17"
+            //"intelliSenseMode": "linux-gcc-x64"
         }
     ],
     "version": 4
