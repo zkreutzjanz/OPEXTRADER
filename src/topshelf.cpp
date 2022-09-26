@@ -533,6 +533,174 @@ float getPercentile(double z){
     return (1.0-erf(-(z)/ sqrt(2.0)))/2.0;
 }
 
+double dayAfterAmIRightStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData dataTemplate,std::vector<dayAfterIncStrategyData> *output,long long testDate,double zCutoff){
+    
+    
+    /**
+     * @brief The generatingBaseTickerData Section (O(globalDatapoints.size()))
+     * Gets all tickers from the given testdate and puts them into an array of dataTemplates.
+     * Added to the datatemplate:
+     *  A copy of the ticker
+     *  The Base bounds computed via the testdates inc for the ticker, the input datatemplates percentile, and the requestmargin
+     */
+    addHeader("generatingBaseTickerData::");
+    double requestMargin = .025;
+    dataTemplate.timeMaxBound=testDate;
+    std::vector<dayAfterIncStrategyData> baseTickerData;
+    for(ticker t:globalTickers){
+        for(int i=t.clusterStart;i<t.clusterEnd+1;i++){
+            if(globalDatapoints.at(i).time==testDate-DAY_VALUE*dataTemplate.dayDifference){
+                dayAfterIncStrategyData newBaseTicker = dataTemplate;
+                double percentile = getPercentile((globalDatapoints.at(i).change-t.mean)/t.std);
+                newBaseTicker.baseMinBound= getZScore((percentile - requestMargin)<0?.01:(percentile - requestMargin))*t.std+t.mean;
+                newBaseTicker.baseMaxBound = getZScore((percentile + requestMargin)>1?.99:(percentile + requestMargin))*t.std+t.mean;
+                newBaseTicker.base=t;
+                baseTickerData.push_back(newBaseTicker);
+                break;
+            }
+        }
+    }
+    removeHeader("generatingBaseTickerData::");
+    
+    /**
+     * @brief The identifyBaseTickerResponsibiliy
+     * Decides which baseTicker datatemplates the current node needs to worry about.
+     */
+    addHeader("identifyBaseTickerResponsibiliy::");
+    int baseTickerStart=0;
+    int baseTickerEnd=0;
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        if(baseTickerData.size()<size){
+            baseTickerStart=rank;
+            baseTickerEnd= baseTickerData.size()>rank?rank+1:rank;
+        }else{
+            int partition = baseTickerData.size()/size;
+            baseTickerStart=partition*rank;
+            baseTickerEnd= (rank+1==size)?baseTickerData.size():partition*(rank+1);
+        }
+    }else{
+        baseTickerStart=0;
+        baseTickerEnd=baseTickerData.size();
+    }
+    removeHeader();
+
+
+    /**
+     * @brief The generatingTargetTickerData Section
+     * For every Base ticker datatemplate a datatemplate is made for every target ticker, 
+     *  filtered by if they are seen as profittable based on preset target bounds, z score, and likelihood from template
+     */
+    addHeader("generatingTargetTickerData::");
+    std::vector<dayAfterIncStrategyData> localTargetTickerData;
+    for(int i = baseTickerStart;i<baseTickerEnd;i++){
+
+        //finds all datapoints from base ticker in base bound
+        std::vector<datapoint> basesInBound;
+        baseTickerData.at(i).totalBase=0;
+        for(int baseID = baseTickerData.at(i).base.clusterStart; baseID<baseTickerData.at(i).base.clusterEnd+1;baseID++){
+            if(globalDatapoints.at(baseID).time>=baseTickerData.at(i).timeMinBound
+             &&globalDatapoints.at(baseID).time<baseTickerData.at(i).timeMaxBound-DAY_VALUE*dataTemplate.dayDifference){
+                baseTickerData.at(i).totalBase++;
+                if(globalDatapoints.at(baseID).change>=baseTickerData.at(i).baseMinBound
+                    &&globalDatapoints.at(baseID).change<=baseTickerData.at(i).baseMaxBound){
+                    basesInBound.push_back(globalDatapoints.at(baseID));
+                }
+            }
+        }
+        baseTickerData.at(i).totalBaseInBound=basesInBound.size();
+     
+
+
+
+        //goes through all possible target tickers
+        for(ticker tt:globalTickers){
+            if(tt.id==baseTickerData.at(i).base.id) continue;
+            int ttStart = tt.clusterStart;
+            dayAfterIncStrategyData targetTickerData = baseTickerData.at(i);
+            targetTickerData.totalTarget=0;
+            targetTickerData.totalTargetInBound=0;
+            for(datapoint bd:basesInBound){
+                for(int td=ttStart;td<tt.clusterEnd+1-dataTemplate.dayDifference;td++){
+                    if(globalDatapoints.at(td).time==bd.time){
+                        targetTickerData.totalTarget++;
+                        if(globalDatapoints.at(td+dataTemplate.dayDifference).change>=baseTickerData.at(i).targetMinBound
+                         &&globalDatapoints.at(td+dataTemplate.dayDifference).change<=baseTickerData.at(i).targetMaxBound
+                        ){
+                            targetTickerData.totalTargetInBound++;
+                        }
+                        ttStart=td+1;
+                        break;
+                    }
+                }
+            }
+
+            //generate stats for the given targettickerdata
+            if(!targetTickerData.totalTarget) continue;
+            double zout = ((double)((double)targetTickerData.totalTargetInBound/(double)targetTickerData.totalTarget)-targetTickerData.likelihood)/sqrt((1-targetTickerData.likelihood)*targetTickerData.likelihood/targetTickerData.totalTarget);
+            if(zout<zCutoff) continue;
+            targetTickerData.target = tt;
+            targetTickerData.zScore=zout;
+            targetTickerData.responseVal=0;
+            //get the profit, note:this is sometimes 0
+            for(int td=tt.clusterStart;td<tt.clusterEnd+1;td++){
+                if(globalDatapoints.at(td).time==testDate) targetTickerData.responseVal=globalDatapoints.at(td).change;
+            }
+            
+            localTargetTickerData.push_back(targetTickerData);
+        }
+    }
+    removeHeader("generatingTargetTickerData::");
+   
+
+    /**
+     * @brief generatingFinalTargetDataVector
+     * If it is multithreaded, combines all local vectors
+     * otherwise just copies local vector over
+     */
+    addHeader("generatingFinalTargetDataVector::");
+    std::vector<dayAfterIncStrategyData> finalTargetTickerData;
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        int localTargetCount = localTargetTickerData.size();
+        std::vector<int> localTargetCounts;
+        localTargetCounts.resize(size);
+        MPI_Gather(&localTargetCount,1,MPI_INT,&localTargetCounts[0],1,MPI_INT,0,MPI_COMM_WORLD);
+        std::vector<int> localTargetDispls;
+        localTargetDispls.push_back(0);
+        int totalTargets= rank==0?localTargetCounts.at(0):0;
+        for(int i=1;i<size;i++){
+            if(rank==0) totalTargets += localTargetCounts.at(i);
+            localTargetDispls.push_back(localTargetDispls.at(i-1)+localTargetCounts.at(i-1));
+        }
+        finalTargetTickerData.resize(totalTargets);
+        MPI_Gatherv(&localTargetTickerData[0],localTargetCount,dayAfterIncStrategyDatatype,(&finalTargetTickerData[0]),&localTargetCounts[0],&localTargetDispls[0],dayAfterIncStrategyDatatype,0,MPI_COMM_WORLD);
+    }else{
+        finalTargetTickerData= localTargetTickerData;
+    }
+    removeHeader("generatingFinalTargetDataVector::");
+
+    addHeader("combiningReports::");
+    
+    int right=0;
+    int wrong=0;
+    for(dayAfterIncStrategyData r:finalTargetTickerData){
+        if(r.responseVal>=r.targetMinBound&&r.responseVal<=r.targetMaxBound){
+            right++;
+        }else{
+            wrong++;
+        }
+        output->push_back(r);
+       
+    }
+    
+    removeHeader("combiningreports::");
+    if(right+wrong==0){return 0;}
+    if(right/(right+wrong)>=dataTemplate.likelihood){
+        return .05;
+    }else{
+        return -.05;
+    }
+}
+
 double dayAfterIncStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData dataTemplate,std::vector<dayAfterIncStrategyData> *output,long long testDate,double zCutoff){
     
     
@@ -566,6 +734,7 @@ double dayAfterIncStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData dataTemp
      * @brief The identifyBaseTickerResponsibiliy
      * Decides which baseTicker datatemplates the current node needs to worry about.
      */
+    addHeader("identifyBaseTickerResponsibiliy::");
     int baseTickerStart=0;
     int baseTickerEnd=0;
     if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
@@ -581,7 +750,7 @@ double dayAfterIncStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData dataTemp
         baseTickerStart=0;
         baseTickerEnd=baseTickerData.size();
     }
-
+    removeHeader();
 
 
     /**
@@ -689,6 +858,98 @@ double dayAfterIncStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData dataTemp
     return finalTargetTickerData.size()?sum/(double)finalTargetTickerData.size():0;
 }
 
+double tickerAndChangeStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData dataTemplate,std::vector<dayAfterIncStrategyData> *responseData,long long testDate,double zCutoff){
+    /**
+     * @brief The generatingBaseTickerData Section (O(globalDatapoints.size()))
+     * Gets all tickers from the given testdate and puts them into an array of dataTemplates.
+     * Added to the datatemplate:
+     *  A copy of the ticker
+     *  The Base bounds computed via the testdates inc for the ticker, the input datatemplates percentile, and the requestmargin
+     */
+    addHeader("generatingBaseTickerData::");
+    dataTemplate.timeMaxBound=testDate;
+    dayAfterIncStrategyData baseTickerData = dataTemplate;
+    removeHeader("generatingBaseTickerData::");
+ 
+    /**
+     * @brief The generatingTargetTickerData Section
+     * For every Base ticker datatemplate a datatemplate is made for every target ticker, 
+     *  filtered by if they are seen as profittable based on preset target bounds, z score, and likelihood from template
+     */
+    addHeader("generatingTargetTickerData::");
+   
+        //finds all datapoints from base ticker in base bound
+        std::vector<datapoint> basesInBound;
+        baseTickerData.totalBase=0;
+        for(int baseID = baseTickerData.base.clusterStart; baseID<baseTickerData.base.clusterEnd+1;baseID++){
+            if(globalDatapoints.at(baseID).time>=baseTickerData.timeMinBound
+             &&globalDatapoints.at(baseID).time<baseTickerData.timeMaxBound-DAY_VALUE*dataTemplate.dayDifference){
+                baseTickerData.totalBase++;
+                if(globalDatapoints.at(baseID).change>=baseTickerData.baseMinBound
+                    &&globalDatapoints.at(baseID).change<=baseTickerData.baseMaxBound){
+                    basesInBound.push_back(globalDatapoints.at(baseID));
+                }
+            }
+        }
+        baseTickerData.totalBaseInBound=basesInBound.size();
+     
+
+
+
+        //goes through all possible target tickers
+        std::vector<dayAfterIncStrategyData> targetData;
+        for(ticker tt:globalTickers){
+            if(tt.id==baseTickerData.base.id) continue;
+            int ttStart = tt.clusterStart;
+            dayAfterIncStrategyData targetTickerData = baseTickerData;
+            targetTickerData.totalTarget=0;
+            targetTickerData.totalTargetInBound=0;
+            for(datapoint bd:basesInBound){
+                for(int td=ttStart;td<tt.clusterEnd+1-dataTemplate.dayDifference;td++){
+                    if(globalDatapoints.at(td).time==bd.time){
+                        targetTickerData.totalTarget++;
+                        if(globalDatapoints.at(td+dataTemplate.dayDifference).change>=baseTickerData.targetMinBound
+                         &&globalDatapoints.at(td+dataTemplate.dayDifference).change<=baseTickerData.targetMaxBound
+                        ){
+                            targetTickerData.totalTargetInBound++;
+                        }
+                        ttStart=td+1;
+                        break;
+                    }
+                }
+            }
+
+            //generate stats for the given targettickerdata
+            if(!targetTickerData.totalTarget) continue;
+            double zout = ((double)((double)targetTickerData.totalTargetInBound/(double)targetTickerData.totalTarget)-targetTickerData.likelihood)/sqrt((1-targetTickerData.likelihood)*targetTickerData.likelihood/targetTickerData.totalTarget);
+            if(zout<zCutoff) continue;
+            targetTickerData.target = tt;
+            targetTickerData.zScore=zout;
+            targetTickerData.responseVal=0;
+            //get the profit, note:this is sometimes 0
+            for(int td=tt.clusterStart;td<tt.clusterEnd+1;td++){
+                if(globalDatapoints.at(td).time==testDate) targetTickerData.responseVal=globalDatapoints.at(td).change;
+            }
+            
+            targetData.push_back(targetTickerData);
+        }
+    
+    removeHeader("generatingTargetTickerData::");
+   
+
+    
+    addHeader("combiningReports::");
+    double sum=0;
+    for(dayAfterIncStrategyData r:targetData){
+        
+        responseData->push_back(r);
+       
+    }
+    removeHeader("combiningreports::");
+    
+    return 0;
+}
+
 double shortTermInvestmentStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData requestTemplate,std::vector<dayAfterIncStrategyData> *responseData,long long testDate,double zCutoff){
     double changeSum=0;
     double changeCount=0;
@@ -740,16 +1001,19 @@ double backtestDailyInvestmentStrategy(int MULTITHREAD_MODE,T requestTemplate,st
             childMultithreadableEnd=endingTestDate;
         }else{
             long long partition =(endingTestDate-startingTestDate+DAY_VALUE)/size;
-            localStart=partition*rank;
-            localEnd= partition*(rank+1);
-            childMultithreadableStart=partition*(rank+1);
+            localStart=partition*rank+startingTestDate;
+            localEnd= partition*(rank+1)+startingTestDate;
+            childMultithreadableStart=partition*(size)+startingTestDate;
             childMultithreadableEnd=endingTestDate;
         }
     }else{
         childMultithreadableStart=startingTestDate;
         childMultithreadableEnd=endingTestDate;
-        MODE=MULTITHREAD_PARENT_ON;
+        MULTITHREAD_MODE=MULTITHREAD_PARENT_ON;
     }
+    /* MPI_Barrier(MPI_COMM_WORLD);
+    logger("locS:"+std::to_string(localStart)+" locE:"+std::to_string(localEnd)+" chilS:"+std::to_string(childMultithreadableStart)+" chilE:"+std::to_string(childMultithreadableEnd));
+    MPI_Barrier(MPI_COMM_WORLD); */
     removeHeader("identifyStrategyResponsibility");
 
     /**
@@ -758,11 +1022,14 @@ double backtestDailyInvestmentStrategy(int MULTITHREAD_MODE,T requestTemplate,st
      */
     addHeader("findLocallyComputedDailyStrategyProfits");
     std::vector<double> localProfits;
-    for(int i =localStart;i<localEnd;i+=DAY_VALUE){
+    for(long long i =localStart;i<localEnd;i+=DAY_VALUE){
         requestTemplate.timeMaxBound=i;
         std::vector<T> garbage;
         localProfits.push_back(dailyStrategy(MULTITHREAD_PARENT_ON,requestTemplate,&garbage,i,zCutoff));
     }
+   /*  MPI_Barrier(MPI_COMM_WORLD);
+    logger("lc size: "+std::to_string(localProfits.size()));
+    MPI_Barrier(MPI_COMM_WORLD); */
     removeHeader("findLocallyComputedDailyStrategyProfits");
 
      /**
@@ -771,24 +1038,28 @@ double backtestDailyInvestmentStrategy(int MULTITHREAD_MODE,T requestTemplate,st
      * otherwise just copies local vector over
      */
     addHeader("combineLocalProfitVectors::");
-    std::vector<dayAfterIncStrategyData> profits;
+    std::vector<double> profits;
     if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
         int localProfitCount = localProfits.size();
         std::vector<int> localProfitCounts;
         localProfitCounts.resize(size);
-        MPI_Gather(&localProfitCount,1,MPI_INT,&localProfitCounts[0],1,MPI_INT,0,MPI_COMM_WORLD);
+        MPI_Allgather(&localProfitCount,1,MPI_INT,&localProfitCounts[0],1,MPI_INT,MPI_COMM_WORLD);
         std::vector<int> localProfitDispls;
         localProfitDispls.push_back(0);
-        int totalProfits= rank==0?localProfitCounts.at(0):0;
+        int totalProfits= localProfitCounts.at(0);
         for(int i=1;i<size;i++){
-            if(rank==0) totalProfits += localProfitCounts.at(i);
+            totalProfits += localProfitCounts.at(i);
             localProfitDispls.push_back(localProfitDispls.at(i-1)+localProfitCounts.at(i-1));
         }
         profits.resize(totalProfits);
-        MPI_Gatherv(&localProfits[0],localProfitCount,MPI_DOUBLE,(&profits[0]),&localProfitCounts[0],&localProfitDispls[0],MPI_DOUBLE,0,MPI_COMM_WORLD);
+        
+        MPI_Allgatherv(&localProfits[0],localProfitCount,MPI_DOUBLE,(&profits[0]),&localProfitCounts[0],&localProfitDispls[0],MPI_DOUBLE,MPI_COMM_WORLD);
     }else{
         profits= localProfits;
     }
+    /*  MPI_Barrier(MPI_COMM_WORLD);
+    logger("p size: "+std::to_string(profits.size()));
+    MPI_Barrier(MPI_COMM_WORLD); */
     removeHeader("combineLocalProfitVectors::");
 
     
@@ -801,16 +1072,21 @@ double backtestDailyInvestmentStrategy(int MULTITHREAD_MODE,T requestTemplate,st
     for(long long i=childMultithreadableStart;i<=childMultithreadableEnd;i+=DAY_VALUE){
         requestTemplate.timeMaxBound=i;
         std::vector<T> garbage;
-        profits.push_back(dailyStrategy(MODE,requestTemplate,&garbage,i,zCutoff));
+        profits.push_back(dailyStrategy(MULTITHREAD_MODE,requestTemplate,&garbage,i,zCutoff));
     }
-    removeHeader("findGloballyComputedDailyStrategyProfits");
+   /* MPI_Barrier(MPI_COMM_WORLD);
+    logger("fp size: "+std::to_string(profits.size()));
+    MPI_Barrier(MPI_COMM_WORLD);*/
+    removeHeader("findGloballyComputedDailyStrategyProfits"); 
     double profit =1.0;
     for(double p:profits){
-        if(p>0) results->push_back(std::to_string(p));
+        if(p!=0) results->push_back(std::to_string(p));
         profit*=(1+p);
     }
     return profit;
 }
+
+
 
 template<typename T>
 std::vector<T> runDailyInvestmentStrategy(T requestTemplate,long long testDate,double zCutoff,double dailyStrategy(int,T,std::vector<T> *,long long,double)){
@@ -1120,30 +1396,38 @@ int main(int argc,char** argv){
     **/
     addHeader("dayAfterIncStrategy::");
     dayAfterIncStrategyData strat = {
-        .targetMinBound=.0,
-        .targetMaxBound=5,
+        .targetMinBound=-.009,
+        .targetMaxBound=.009,
         .timeMinBound=globalDatapoints.at(0).time,
-        .likelihood = .5,
-        .dayDifference=1
+        .timeMaxBound=globalDatapoints.at(globalDatapoints.size()-10).time,
+        .likelihood = .8,
+        .dayDifference=2
     };
     std::vector<std::string> results;
     std::vector<std::string> garbage;
-    double normalProfit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&garbage,globalDatapoints.at(globalDatapoints.size()-350).time,globalDatapoints.at(globalDatapoints.size()-100).time,0,&longTermInvestmentStrategy);
-            
-    for(double z = 0;z<=10;z+=.5){
+    //double normalProfit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&garbage,globalDatapoints.at(globalDatapoints.size()-150).time,globalDatapoints.at(globalDatapoints.size()-100).time,0,&longTermInvestmentStrategy);
+    
+
+    
+    
+    
+    for(double z = 0;z<=7;z+=.5){
         //if(rank==0) logger(z);
-        for(double likely =.5;likely<=.75;likely+=.01){
+        for(double likely =.5;likely<=.85;likely+=.05){
             //if(rank==0) logger(likely);
             std::vector<std::string> profitResults;
             strat.likelihood = likely;
-            double profit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&profitResults,globalDatapoints.at(globalDatapoints.size()-350).time,globalDatapoints.at(globalDatapoints.size()-100).time,z,&dayAfterIncStrategy);
-            std::string me =std::to_string(z)+";"+std::to_string(likely)+";"+std::to_string((profit/normalProfit)-1)+";"+std::to_string(profit)+";"+std::to_string(normalProfit);
+            //double profit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&profitResults,globalDatapoints.at(globalDatapoints.size()-150).time,globalDatapoints.at(globalDatapoints.size()-100).time,z,&dayAfterIncStrategy);
+            double profit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&profitResults,globalDatapoints.at(globalDatapoints.size()-1000).time,globalDatapoints.at(globalDatapoints.size()-13).time,z,&dayAfterAmIRightStrategy);
+
+            std::string me =std::to_string(z)+";"+std::to_string(likely)+";"+std::to_string(profit);
             results.push_back(me);
             
-            if(rank==0) logger(me);
+         if(rank==0) logger(me);
         }
         
     }
+    
    removeHeader();
    
 
