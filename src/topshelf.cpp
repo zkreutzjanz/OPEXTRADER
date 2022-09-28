@@ -14,6 +14,8 @@
 #include <sys/time.h>
 #include <mpi.h>
 
+#define LONG_LONG_MIN -__LONG_LONG_MAX__-1
+#define LONG_LONG_MAX __LONG_LONG_MAX__
 
 
 //Constants and Definintions
@@ -78,6 +80,7 @@ struct analysisParameter{
     double targetPercentInc;
     long long baseDayDiff=0;//work on that
     long long targetDayDiff=0;
+    
     long long timeMin=LONG_LONG_MIN;
     long long timeMax=LONG_LONG_MAX;
     long long targetDayOffset;
@@ -85,18 +88,39 @@ struct analysisParameter{
 MPI_Datatype analysisParameterDatatype;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-//FIX, not efficient
-//Globals
-////////////////////////////////////////////////////////////////////////////////////////////////////
 std::vector<ticker> globalTickers;
 std::vector<datapoint> globalDatapoints;
 int rank;
 int size;
 std::vector<std::string> log_Header_Vector;
 std::string log_Header;
+std::string findNameFromID(long long id){
+    for(datapoint d: globalDatapoints){
+        if(d.id==id){
+            return d.name;
+        }
+    }
+    return "";
+}
+
+unsigned long long convertNameToID(std::string in){
+    int charsToPushFromName = in.size()>TICKER_NAME_LENGTH?TICKER_NAME_LENGTH:in.size();
+    char name[TICKER_NAME_LENGTH] = {' '};
+    unsigned long long out=0;
+    if(charsToPushFromName>0){
+		for(int i=0;i<charsToPushFromName;i++){name[i] = in.at(i);}
+        for(int i =0;i<TICKER_NAME_LENGTH;i++) {out |= (name[i] << (i*8));}
+    }
+    return out;
+}
+
+//FIX, not efficient
+//Globals
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 void parseReportToStorageLine(dayAfterIncStrategyData *in,std::string delimiter,std::string *out);
+void parseAnalysisParameterToStorageLine(analysisParameter *in,std::string delimiter,std::string *out);
 /**
  * @brief For implicit compile time logging
  * @param message std::string message to log
@@ -935,89 +959,9 @@ double longTermInvestmentStrategy(int MULTITHREAD_MODE,dayAfterIncStrategyData r
 
 
 
-
-
-
-struct analysisParameter{
-    ticker base;
-    ticker target;
-    int baseTotal=0;
-    int baseInBound=0;
-    int targetTotal;
-    int targetInBound;
-    double baseMin=__DBL_MAX__;
-    double baseMax=__DBL_MIN__;
-    double baseBoundMargin;
-    double targetMin=__DBL_MAX__;
-    double targetMax=__DBL_MIN__;
-    double targetZScore;
-    double targetPercentInc;
-    long long baseDayDiff=0;//work on that
-    long long targetDayDiff=0;
-    long long timeMin=LONG_LONG_MIN;
-    long long timeMax=LONG_LONG_MAX;
-    long long targetDayOffset;
-};
 //To DO support setting of variable target range
 
 
-void safeAnalysis(analysisParameter in,std::vector<analysisParameter> *out,datapoint testDatapoint){
-    //first i have to figure out what type of analysis this is
-     
-    //creates basebounds, if non preset the in->baseBoundMargin must be set. 
-    createBaseBounds(&in,&testDatapoint);//VNFE
-
-    std::vector<datapoint> validBases;//certified fresh and clean, absolutely valid(So much cooler than me)
-    findValidBases(&in,&validBases);
-    
-    //now we look through every ticker in the known universe
-    //lets see if we already have bounds set though... just to make it quicker
-    if(in.targetMax<in.targetMin) throw "safeAnalysis:: target bounds not set. (Why??)";
-    for(ticker t: globalTickers){
-        analysisParameter result=in;
-        double mean = t.mean;
-        double std = t.std;
-        //if it is a multiday change test, the distr is diff, so reset mean and std
-        if(in.targetDayDiff){
-            double changeSum=0;
-            double count = t.clusterEnd+1-t.clusterStart-in.targetDayDiff;
-            for(int tDP =t.clusterStart+in.targetDayDiff;tDP<t.clusterEnd+1;tDP++){
-                changeSum += globalDatapoints.at(tDP).adjClose/globalDatapoints.at(tDP-in.targetDayDiff).adjClose-1;
-            }
-            mean = changeSum/count;
-            double stdSum=0;
-            for(int tDP =t.clusterStart+in.targetDayDiff;tDP<t.clusterEnd+1;tDP++){
-                double change = globalDatapoints.at(tDP).adjClose/globalDatapoints.at(tDP-in.targetDayDiff).adjClose-1;
-                stdSum += (change-mean)*(change-mean);
-            }
-            std = sqrt(stdSum/(double)(count));
-        }
-
-        for(datapoint bDP:validBases){
-            for(int tDP =t.clusterStart;tDP<t.clusterEnd+1-in.targetDayOffset;tDP++){
-                /// work on this stuff, possible loss of data
-                if(globalDatapoints.at(tDP).time==bDP.time){
-                    //now bound checking etc
-                    double change = in.targetDayDiff?globalDatapoints.at(tDP+in.targetDayOffset).adjClose/globalDatapoints.at(tDP+in.targetDayOffset-in.targetDayDiff).adjClose-1:(globalDatapoints.at(tDP+in.targetDayOffset).change);
-                    result.targetTotal++;
-                    if(change>=in.targetMin&&change<=in.targetMax){
-                        result.targetInBound++;
-                    }
-                }
-            }
-        }
-
-        //now we see if it is a good sample
-        logger(result);
-        if(!result.targetTotal) continue;
-        double zout = ((double)((double)result.targetInBound/(double)result.targetTotal)-result.targetPercentInc)/sqrt((1-result.targetPercentInc)*result.targetPercentInc/result.targetTotal);
-        if(zout<result.targetZScore) continue;
-        result.target = t;
-        result.targetZScore=zout;
-        out->push_back(result);
-        logger(result);
-    }
-}
 
 void createBaseBounds(analysisParameter *in,datapoint *testDatapoint){
     //if no bounds are already set, set them based on the test datapoints change value
@@ -1065,7 +1009,7 @@ void createBaseBounds(analysisParameter *in,datapoint *testDatapoint){
                     found==true;
                 }
             }
-            if(!found) throw "createBaseBounds:: testdatapoint has no ~ child time value in target dps time values. Why are you inputing an invalid test datapoint??";
+            if(!found) throw "createBaseBounds:: testdatapoint has no ~ child time value in base dps time values. Why are you inputing an invalid test datapoint for a multi day inc??";
             
             //create the probablity distr for getting z score
             double sumOfChange=0;
@@ -1109,20 +1053,160 @@ void findValidBases(analysisParameter *in,std::vector<datapoint> *out){
     }
 }
 
+void backtestAnalysis(analysisParameter in,long long startDate, long long endDate,void analysis(analysisParameter,std::vector<analysisParameter> *,datapoint)){
+    for(long long day=startDate;day<endDate+DAY_VALUE;day+DAY_VALUE){
+        //first identify which datapoint bases to test on
+        for()
 
 
-std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate,std::vector<datapoint> testData){
-    std::vector<analysisParameter> results;
-    for(datapoint d:testData){
-        for(ticker t:globalTickers){
-            if(t.clusterStart=d.id){
-                analysisParameter current = analysisTemplate;
-                current.base=t;
-                safeAnalysis(current,&results,d);
+    }
+}
+
+void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, double *rightnessRatio,double *estProfit,long long testDay,void analysis(analysisParameter,std::vector<analysisParameter> *)){
+    std::vector<analysisParameter> aps;
+    
+    for(ticker t:globalTickers){
+        for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
+            if(globalDatapoints.at(i).time==testDay){
+                analysisParameter temp = analysisTemplate;
+                temp.base=t;
+                createBaseBounds(&temp,&globalDatapoints.at(i));
             }
         }
     }
+
+    int firstAP=0;
+    int lastAP=aps.size();
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        int partition = lastAP/size;
+        firstAP = rank*partition;
+        lastAP = partition*(rank+1)+((rank==size-1)?lastAP-partition*(rank+1):0);
+    }
+
+    std::vector<analysisParameter> localResults;
+    for(int apID = firstAP;apID<lastAP;apID++){
+        safeAnalysis(aps.at(apID),&localResults);
+    }
+
+    std::vector<analysisParameter> results;
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        int localResultsCount = localResults.size();
+        std::vector<int> localResultsCounts;
+        localResultsCounts.resize(size);
+        MPI_Allgather(&localResultsCount,1,MPI_INT,&localResultsCounts[0],1,MPI_INT,MPI_COMM_WORLD);
+        std::vector<int> localResultsDispls;
+        localResultsDispls.push_back(0);
+        int totalResults= localResultsCounts.at(0);
+        for(int i=1;i<size;i++){
+            totalResults += localResultsCounts.at(i);
+            localResultsDispls.push_back(localResultsDispls.at(i-1)+localResultsCounts.at(i-1));
+        }
+        results.resize(totalResults);
+        
+        MPI_Allgatherv(&localResults[0],localResultsCount,analysisParameterDatatype,(&results[0]),&localResultsCounts[0],&localResultsDispls[0],analysisParameterDatatype,MPI_COMM_WORLD);
+    }else{
+        results= localResults;
+    }
+
+    double profitSum=0;
+    int right=0;
+    int wrong=0;
+    for(ticker t:globalTickers){
+        for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
+            if(globalDatapoints.at(i).time==testDay){
+                analysisParameter temp = analysisTemplate;
+                temp.base=t;
+                createBaseBounds(&temp,&globalDatapoints.at(i));
+            }
+        }
+    }
+    
+    
 }
+
+void safeAnalysis(analysisParameter in,std::vector<analysisParameter> *out){
+        //have fully formed base before this
+    
+        //creates basebounds, if non preset the in->baseBoundMargin must be set. 
+        //createBaseBounds(&in,&testDatapoint);//VNFE
+        //I shoudl move this
+
+        std::vector<datapoint> validBases;//certified fresh and clean, absolutely valid(So much cooler than me)
+        findValidBases(&in,&validBases);
+        
+        //now we look through every ticker in the known universe
+        //lets see if we already have bounds set though... just to make it quicker
+        if(in.targetMax<in.targetMin) throw "safeAnalysis:: target bounds not set. (Why??)";
+        for(ticker t: globalTickers){
+            analysisParameter result=in;
+            double mean = t.mean;
+            double std = t.std;
+            //if it is a multiday change test, the distr is diff, so reset mean and std
+            if(in.targetDayDiff){
+                double changeSum=0;
+                double count = t.clusterEnd+1-t.clusterStart-in.targetDayDiff;
+                for(int tDP =t.clusterStart+in.targetDayDiff;tDP<t.clusterEnd+1;tDP++){
+                    changeSum += globalDatapoints.at(tDP).adjClose/globalDatapoints.at(tDP-in.targetDayDiff).adjClose-1;
+                }
+                mean = changeSum/count;
+                double stdSum=0;
+                for(int tDP =t.clusterStart+in.targetDayDiff;tDP<t.clusterEnd+1;tDP++){
+                    double change = globalDatapoints.at(tDP).adjClose/globalDatapoints.at(tDP-in.targetDayDiff).adjClose-1;
+                    stdSum += (change-mean)*(change-mean);
+                }
+                std = sqrt(stdSum/(double)(count));
+            }
+
+            for(datapoint bDP:validBases){
+                for(int tDP =t.clusterStart;tDP<t.clusterEnd+1-in.targetDayOffset;tDP++){
+                    /// work on this stuff, possible loss of data
+                    if(globalDatapoints.at(tDP).time==bDP.time){
+                        //now bound checking etc
+                        double change = in.targetDayDiff?globalDatapoints.at(tDP+in.targetDayOffset).adjClose/globalDatapoints.at(tDP+in.targetDayOffset-in.targetDayDiff).adjClose-1:(globalDatapoints.at(tDP+in.targetDayOffset).change);
+                        result.targetTotal++;
+                        if(change>=in.targetMin&&change<=in.targetMax){
+                            result.targetInBound++;
+                        }
+                    }
+                }
+            }
+
+            //now we see if it is a good sample
+            
+            if(!result.targetTotal) continue;
+            double zout = ((double)((double)result.targetInBound/(double)result.targetTotal)-result.targetPercentInc)/sqrt((1-result.targetPercentInc)*result.targetPercentInc/result.targetTotal);
+            if(zout<result.targetZScore) continue;
+            result.target = t;
+            result.targetZScore=zout;
+            ->push_back(result);
+            logger(result);
+        }
+}
+std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate,std::vector<datapoint> testData){
+    std::vector<analysisParameter> results;
+    //logger(analysisTemplate);
+    for(datapoint d:testData){for(ticker t:globalTickers){
+        if(t.id==d.id){
+            analysisParameter current = analysisTemplate;
+            current.base=t;
+            safeAnalysis(current,&results,d);
+        }
+    }}
+    return results;
+}
+std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate,long long testDate){
+    std::vector<analysisParameter> results;
+    //logger(analysisTemplate);
+    for(datapoint d:testData){for(ticker t:globalTickers){
+        if(t.id==d.id){
+            analysisParameter current = analysisTemplate;
+            current.base=t;
+            safeAnalysis(current,&results,d);
+        }
+    }}
+    return results;
+}
+double getProfitFromDay()
 
 void backtestAnalysis(long long startDate, long long endDate, void analysis(analysisParameter,std::vector<analysisParameter> *,datapoint)){
     
@@ -1131,8 +1215,7 @@ void backtestAnalysis(long long startDate, long long endDate, void analysis(anal
 
 template<typename T>
 double backtestDailyInvestmentStrategy(int MULTITHREAD_MODE,T requestTemplate,std::vector<std::string> *results, long long startingTestDate,long long endingTestDate,double zCutoff,double dailyStrategy(int,T,std::vector<T> *,long long,double)){
-    std::tuple<long long,double, double>
-
+    
     //the tuple tells me what ticker to look at, The range it should be in, the strategy outputs these based on likelihood
     //I need to know how to invest in the strategy. 
     //strategyParameters- these parameters are not the same per method
@@ -1502,23 +1585,7 @@ void writeGlobalVectorsToFiles(std::string datapointFileName,std::string tickerF
 
 }
 
-long long convertNameToID(std::string in){
-    int charsToPushFromName = in.size()>TICKER_NAME_LENGTH?TICKER_NAME_LENGTH:in.size();
-    char name[TICKER_NAME_LENGTH] = {' '};
-    long long out=0;
-    if(charsToPushFromName>0){
-		for(int i=0;i<charsToPushFromName;i++) name[i] = in.at(i);
-        for(int i =0;i<TICKER_NAME_LENGTH;i++) out |= (name[i] << (i*8));
-    }
-    return out;
-}
-std::string findNameFromID(long long id){
-    for(datapoint d: globalDatapoints){
-        if(d.id=id){
-            return d.name;
-        }
-    }
-}
+
 
 
 
@@ -1564,54 +1631,65 @@ int main(int argc,char** argv){
     writeGlobalVectorsToFiles("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
     removeHeader();
     **/
+    MPI_Barrier(MPI_COMM_WORLD);
+    logger("to dps");
+    MPI_Barrier(MPI_COMM_WORLD);
 
-
-    std::vector<datapoint> testDps = {
-        new datapoint{
-            .id=convertNameToID(""),
-            .name="",
+    std::vector<datapoint> testDps;
+    datapoint dp1=datapoint{
+            .id=convertNameToID("AAPL"),
+            .name="AAPL",
+            .open=146.28,
+            .close=149.84,
+            .adjClose=149.84,
+            .change=-.0129
+        };
+    datapoint dp2 = datapoint{
+            .id=convertNameToID("AMZN"),
+            .name="AMZN",
             .time=0,
-            .open=0,
-            .close=1,
-            .adjClose=1,
-            .change=1
-        },
-        new datapoint{
-            .id=1,
-            .name="a",
-            .time=1,
-            .open=0,
-            .close=1,
-            .adjClose=1,
-            .change=1
-        },
+            .open=114.03,
+            .close=118.05,
+            .adjClose=118.05,
+            .change=.0312
     };
-
-    analysisParameter testAP = 
+    testDps.push_back(dp1);
+    testDps.push_back(dp2);
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    logger("dps created");
+    MPI_Barrier(MPI_COMM_WORLD);
+    analysisParameter testAP = analysisParameter
     {
     .baseMin=__DBL_MAX__,
     .baseMax=__DBL_MIN__,
     .baseBoundMargin=.05,
-    .targetMin=-.01,
-    .targetMax=.01,
+    .targetMin=0,
+    .targetMax=1,
     .targetZScore=0,
-    .targetPercentInc=.5,
-    .baseDayDiff=1,
-    .targetDayDiff=1,
+    .targetPercentInc=.6,
+    .baseDayDiff=0,
+    .targetDayDiff=2,
     .timeMin=LONG_LONG_MIN,
     .timeMax=LONG_LONG_MAX,
-    .targetDayOffset=1
+    .targetDayOffset=2
     };
+    MPI_Barrier(MPI_COMM_WORLD);
+    logger("ap created");
+    MPI_Barrier(MPI_COMM_WORLD);
     std::vector<analysisParameter> out;
+    addHeader("runAnalysis");
     if(rank==0) out = runAnalysisOnDay(0,testAP,testDps);
-    
+    removeHeader();
+    /**}
+    catch (const char* msg) {
+     std::cerr << msg << std::endl;
+   }**/
 
    
     //double normalProfit = backtestDailyInvestmentStrategy(MULTITHREAD_PARENT_OFF,strat,&garbage,globalDatapoints.at(globalDatapoints.size()-150).time,globalDatapoints.at(globalDatapoints.size()-100).time,0,&longTermInvestmentStrategy);
     
 
-    
-   removeHeader();
    
 
     addHeader("writeResultsTofile");
