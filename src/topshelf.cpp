@@ -90,6 +90,7 @@ MPI_Datatype analysisParameterDatatype;
 
 std::vector<ticker> globalTickers;
 std::vector<datapoint> globalDatapoints;
+std::vector<long long> tradableDays;
 int rank;
 int size;
 std::vector<std::string> log_Header_Vector;
@@ -1053,18 +1054,9 @@ void findValidBases(analysisParameter *in,std::vector<datapoint> *out){
     }
 }
 
-void backtestAnalysis(analysisParameter in,long long startDate, long long endDate,void analysis(analysisParameter,std::vector<analysisParameter> *,datapoint)){
-    for(long long day=startDate;day<endDate+DAY_VALUE;day+DAY_VALUE){
-        //first identify which datapoint bases to test on
-        for()
-
-
-    }
-}
-
-void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, double *rightnessRatio,double *estProfit,long long testDay,void analysis(analysisParameter,std::vector<analysisParameter> *)){
+void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, double *rightnessRatio,double *estProfit,long long int testDay,void analysis(analysisParameter,std::vector<analysisParameter> *)){
     std::vector<analysisParameter> aps;
-    
+    analysisTemplate.timeMax=testDay;
     for(ticker t:globalTickers){
         for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
             if(globalDatapoints.at(i).time==testDay){
@@ -1102,7 +1094,6 @@ void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, d
             localResultsDispls.push_back(localResultsDispls.at(i-1)+localResultsCounts.at(i-1));
         }
         results.resize(totalResults);
-        
         MPI_Allgatherv(&localResults[0],localResultsCount,analysisParameterDatatype,(&results[0]),&localResultsCounts[0],&localResultsDispls[0],analysisParameterDatatype,MPI_COMM_WORLD);
     }else{
         results= localResults;
@@ -1111,18 +1102,105 @@ void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, d
     double profitSum=0;
     int right=0;
     int wrong=0;
+    int tickersInvestedIn=0;
     for(ticker t:globalTickers){
-        for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
-            if(globalDatapoints.at(i).time==testDay){
-                analysisParameter temp = analysisTemplate;
-                temp.base=t;
-                createBaseBounds(&temp,&globalDatapoints.at(i));
+        bool found=false;
+        for(analysisParameter r:results){
+            if(r.base.id=t.id){
+                for(int i =t.clusterStart;i<t.clusterEnd+1-analysisTemplate.targetDayOffset;i++){
+                    if(globalDatapoints.at(i).time==testDay){
+                        found=true;
+                        double change=0;
+                        if(!analysisTemplate.targetDayDiff){
+                            globalDatapoints.at(i+analysisTemplate.targetDayOffset).adjClose/globalDatapoints.at(i+analysisTemplate.targetDayOffset-analysisTemplate.targetDayDiff).adjClose-1;
+                        }else{
+                            change = globalDatapoints.at(i+analysisTemplate.targetDayOffset).change;
+                        }
+                        profitSum+=change;
+                        if(change>=analysisTemplate.targetMin&&change<=analysisTemplate.targetMax){
+                            right++;
+                        }else{
+                            wrong++;
+                        }
+
+                    }
+                }
             }
         }
+        if(found) tickersInvestedIn++;
     }
-    
-    
+    *rightnessRatio = (double)right/(double)(right+wrong);
+    *estProfit = profitSum/(double)(right+wrong);
 }
+
+
+void backtestAnalysis(int MULTITHREAD_MODE,analysisParameter in,long long startDate, long long endDate,double *finalProfit, double *finalAssurance, void analysis(analysisParameter,std::vector<analysisParameter> *)){
+    
+    std::vector<long long> days;
+    for(long long ll:tradableDays){
+        if(ll<=endDate&&ll>=startDate){
+            days.push_back(ll);
+        }
+    }
+
+    int firstLocal=0;
+    int lastLocal=0;//well 1+last
+    int firstGlobal=0;
+    int lastGlobal=days.size();
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        int partition = lastGlobal/size;
+        firstGlobal=partition*(rank+1);
+        firstLocal = rank*partition;
+        lastLocal = partition*(rank+1);
+    }
+    std::vector<double> localProfits;
+    std::vector<double> localAssurances;
+    for(int dayID=firstLocal;dayID<lastLocal;dayID++){
+        double profit;
+        double assurance;
+        runAnalysisOnDay(MULTITHREAD_PARENT_ON,in,&assurance,&profit,days.at(dayID),analysis);
+        localProfits.push_back(profit);
+        localAssurances.push_back(assurance);
+    }
+
+    std::vector<double> profits;
+    std::vector<double> assurances;
+    if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){//to do rename vars
+        int localResultsCount = localProfits.size();
+        std::vector<int> localResultsCounts;
+        localResultsCounts.resize(size);
+        MPI_Allgather(&localResultsCount,1,MPI_INT,&localResultsCounts[0],1,MPI_INT,MPI_COMM_WORLD);
+        std::vector<int> localResultsDispls;
+        localResultsDispls.push_back(0);
+        int totalResults= localResultsCounts.at(0);
+        for(int i=1;i<size;i++){
+            totalResults += localResultsCounts.at(i);
+            localResultsDispls.push_back(localResultsDispls.at(i-1)+localResultsCounts.at(i-1));
+        }
+        profits.resize(totalResults);
+        MPI_Allgatherv(&localProfits[0],localResultsCount,MPI_DOUBLE,(&profits[0]),&localResultsCounts[0],&localResultsDispls[0],MPI_DOUBLE,MPI_COMM_WORLD);
+        MPI_Allgatherv(&localAssurances[0],localResultsCount,MPI_DOUBLE,(&assurances[0]),&localResultsCounts[0],&localResultsDispls[0],MPI_DOUBLE,MPI_COMM_WORLD);
+    }else{
+        profits= localProfits;
+        assurances=localAssurances;
+    }
+
+    for(int dayID=firstGlobal;dayID<lastGlobal;dayID++){
+        double profit;
+        double assurance;
+        runAnalysisOnDay(MULTITHREAD_MODE,in,&assurance,&profit,days.at(dayID),analysis);
+        profits.push_back(profit);
+        assurances.push_back(assurance);
+    }
+
+    
+    double assuranceSum=0;
+    for(int i =0;i<profits.size();i++){
+        *finalProfit *= 1+profits.at(i);
+        *finalAssurance *= assurances.at(i)>.51?1.33:.66;
+    }
+}
+
 
 void safeAnalysis(analysisParameter in,std::vector<analysisParameter> *out){
         //have fully formed base before this
@@ -1178,11 +1256,11 @@ void safeAnalysis(analysisParameter in,std::vector<analysisParameter> *out){
             if(zout<result.targetZScore) continue;
             result.target = t;
             result.targetZScore=zout;
-            ->push_back(result);
+            out->push_back(result);
             logger(result);
         }
 }
-std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate,std::vector<datapoint> testData){
+/**std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate,std::vector<datapoint> testData){
     std::vector<analysisParameter> results;
     //logger(analysisTemplate);
     for(datapoint d:testData){for(ticker t:globalTickers){
@@ -1205,12 +1283,8 @@ std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisPar
         }
     }}
     return results;
-}
-double getProfitFromDay()
+}**/
 
-void backtestAnalysis(long long startDate, long long endDate, void analysis(analysisParameter,std::vector<analysisParameter> *,datapoint)){
-    
-}
 
 
 template<typename T>
@@ -1585,6 +1659,22 @@ void writeGlobalVectorsToFiles(std::string datapointFileName,std::string tickerF
 
 }
 
+void generateTradableDaysVector(){
+    long long first=globalDatapoints.at(0).time;
+    long long last=first;
+    tradableDays.push_back(last);
+    for(ticker t:globalTickers){
+        for(int d=t.clusterStart;d<t.clusterEnd+1;d++){
+            if(globalDatapoints.at(d).time>last){
+                last=globalDatapoints.at(d).time;
+                tradableDays.push_back(last);
+            }else if(globalDatapoints.at(d).time<first){
+                first = globalDatapoints.at(d).time;
+                tradableDays.insert(tradableDays.begin(),first);
+            }
+        }
+    }
+}
 
 
 
@@ -1631,6 +1721,9 @@ int main(int argc,char** argv){
     writeGlobalVectorsToFiles("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
     removeHeader();
     **/
+
+   
+
     MPI_Barrier(MPI_COMM_WORLD);
     logger("to dps");
     MPI_Barrier(MPI_COMM_WORLD);
@@ -1674,13 +1767,12 @@ int main(int argc,char** argv){
     .timeMax=LONG_LONG_MAX,
     .targetDayOffset=2
     };
-    MPI_Barrier(MPI_COMM_WORLD);
-    logger("ap created");
-    MPI_Barrier(MPI_COMM_WORLD);
-    std::vector<analysisParameter> out;
-    addHeader("runAnalysis");
-    if(rank==0) out = runAnalysisOnDay(0,testAP,testDps);
-    removeHeader();
+
+    double profit;
+    double assurance;
+    backtestAnalysis(MULTITHREAD_PARENT_OFF,testAP,LONG_LONG_MIN,LONG_LONG_MAX,&profit,&assurance,&safeAnalysis);
+    logger(profit);
+    logger(assurance);
     /**}
     catch (const char* msg) {
      std::cerr << msg << std::endl;
@@ -1695,7 +1787,7 @@ int main(int argc,char** argv){
     addHeader("writeResultsTofile");
   
     std::string fileNameProfit= "../assets/results";
-    loadDatastructsToFile(&fileNameProfit,&out,&parseAnalysisParameterToStorageLine);
+    //loadDatastructsToFile(&fileNameProfit,&out,&parseAnalysisParameterToStorageLine);
     removeHeader();
 
 
