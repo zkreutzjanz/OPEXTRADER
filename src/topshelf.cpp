@@ -365,7 +365,7 @@ void parseReportToStorageLine(dayAfterIncStrategyData *in,std::string delimiter,
  * @param *out std::string output line pointer
  */
 void parseAnalysisParameterToStorageLine(analysisParameter *in,std::string delimiter,std::string *out){
-    out->append(std::to_string(in->base.id)+delimiter+std::to_string(in->target.id)+delimiter+findNameFromID(in->base.id)+delimiter+findNameFromID(in->target.id)+delimiter+std::to_string(in->targetInBound)+delimiter+std::to_string(in->targetTotal)+delimiter+std::to_string(in->targetZScore)+"\n");
+    out->append(std::to_string(in->base.id)+delimiter+findNameFromID(in->base.id)+delimiter+std::to_string(in->baseMin)+delimiter+std::to_string(in->baseMax)+delimiter+std::to_string(in->baseInBound)+delimiter+std::to_string(in->baseTotal)+delimiter+std::to_string(in->baseDayDiff)+delimiter+findNameFromID(in->target.id)+delimiter+std::to_string(in->targetMin)+delimiter+std::to_string(in->targetMax)+delimiter+std::to_string(in->targetInBound)+delimiter+std::to_string(in->targetTotal)+delimiter+std::to_string(in->targetDayDiff)+delimiter+std::to_string(in->targetDayOffset)+delimiter+std::to_string(in->targetPercentInc)+delimiter+std::to_string(in->targetZScore)+delimiter+std::to_string(in->timeMin)+delimiter+std::to_string(in->timeMax)+"\n");
 }
 /**
  * @brief Loads file of name [fileName] to *vector<T> [input] via lineParseFunction
@@ -1010,7 +1010,9 @@ void createBaseBounds(analysisParameter *in,datapoint *testDatapoint){
                     found==true;
                 }
             }
-            if(!found) throw "createBaseBounds:: testdatapoint has no ~ child time value in base dps time values. Why are you inputing an invalid test datapoint for a multi day inc??";
+            if(!found){//we limp out, use the inpit change
+                testChange=testDatapoint->change;
+            }
             
             //create the probablity distr for getting z score
             double sumOfChange=0;
@@ -1054,33 +1056,26 @@ void findValidBases(analysisParameter *in,std::vector<datapoint> *out){
     }
 }
 
-void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, double *rightnessRatio,double *estProfit,long long int testDay,void analysis(analysisParameter,std::vector<analysisParameter> *)){
-    std::vector<analysisParameter> aps;
-    analysisTemplate.timeMax=testDay;
-    for(ticker t:globalTickers){
-        for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
-            if(globalDatapoints.at(i).time==testDay){
-                analysisParameter temp = analysisTemplate;
-                temp.base=t;
-                createBaseBounds(&temp,&globalDatapoints.at(i));
-            }
-        }
-    }
+void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, double *rightnessRatio,double *estProfit,std::vector<analysisParameter> in,std::vector<analysisParameter> *results,void analysis(analysisParameter,std::vector<analysisParameter> *)){
+  
+    
 
     int firstAP=0;
-    int lastAP=aps.size();
+    int lastAP=in.size();
     if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
+        
         int partition = lastAP/size;
         firstAP = rank*partition;
         lastAP = partition*(rank+1)+((rank==size-1)?lastAP-partition*(rank+1):0);
     }
-
+   // logger(firstAP);
+    //logger(lastAP);
     std::vector<analysisParameter> localResults;
     for(int apID = firstAP;apID<lastAP;apID++){
-        safeAnalysis(aps.at(apID),&localResults);
+        analysis(in.at(apID),&localResults);
     }
 
-    std::vector<analysisParameter> results;
+    
     if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
         int localResultsCount = localResults.size();
         std::vector<int> localResultsCounts;
@@ -1093,44 +1088,52 @@ void runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate, d
             totalResults += localResultsCounts.at(i);
             localResultsDispls.push_back(localResultsDispls.at(i-1)+localResultsCounts.at(i-1));
         }
-        results.resize(totalResults);
+        results->resize(totalResults);
         MPI_Allgatherv(&localResults[0],localResultsCount,analysisParameterDatatype,(&results[0]),&localResultsCounts[0],&localResultsDispls[0],analysisParameterDatatype,MPI_COMM_WORLD);
     }else{
-        results= localResults;
+        *results= localResults;
     }
-
     double profitSum=0;
     int right=0;
     int wrong=0;
     int tickersInvestedIn=0;
     for(ticker t:globalTickers){
         bool found=false;
-        for(analysisParameter r:results){
-            if(r.base.id=t.id){
+        for(analysisParameter r:*results){
+            logger(r);
+            if(r.base.id==t.id){
                 for(int i =t.clusterStart;i<t.clusterEnd+1-analysisTemplate.targetDayOffset;i++){
-                    if(globalDatapoints.at(i).time==testDay){
+                    if(globalDatapoints.at(i).time==analysisTemplate.timeMax){
                         found=true;
                         double change=0;
-                        if(!analysisTemplate.targetDayDiff){
-                            globalDatapoints.at(i+analysisTemplate.targetDayOffset).adjClose/globalDatapoints.at(i+analysisTemplate.targetDayOffset-analysisTemplate.targetDayDiff).adjClose-1;
+                        
+                        if(analysisTemplate.targetDayDiff){
+                            change = globalDatapoints.at(i+analysisTemplate.targetDayOffset).adjClose/globalDatapoints.at(i+analysisTemplate.targetDayOffset-analysisTemplate.targetDayDiff).adjClose-1;
                         }else{
                             change = globalDatapoints.at(i+analysisTemplate.targetDayOffset).change;
                         }
-                        profitSum+=change;
+                        profitSum += change;
                         if(change>=analysisTemplate.targetMin&&change<=analysisTemplate.targetMax){
                             right++;
                         }else{
                             wrong++;
                         }
-
+                        
                     }
                 }
             }
         }
         if(found) tickersInvestedIn++;
     }
-    *rightnessRatio = (double)right/(double)(right+wrong);
-    *estProfit = profitSum/(double)(right+wrong);
+    
+    /**logger(right);
+    logger(wrong);
+    logger(right);
+    logger(wrong);
+    logger(profitSum);**/
+    *rightnessRatio = (right||wrong)?(double)right/(double)(right+wrong):0;
+    *estProfit = (right||wrong)?profitSum/(double)(right+wrong):0;
+    //logger("Time::"+std::to_string(testDay)+" rightness:: "+std::to_string(*rightnessRatio)+" profit:: "+std::to_string(*estProfit));
 }
 
 
@@ -1142,6 +1145,7 @@ void backtestAnalysis(int MULTITHREAD_MODE,analysisParameter in,long long startD
             days.push_back(ll);
         }
     }
+    
 
     int firstLocal=0;
     int lastLocal=0;//well 1+last
@@ -1149,16 +1153,34 @@ void backtestAnalysis(int MULTITHREAD_MODE,analysisParameter in,long long startD
     int lastGlobal=days.size();
     if(MULTITHREAD_MODE==MULTITHREAD_PARENT_OFF){
         int partition = lastGlobal/size;
-        firstGlobal=partition*(rank+1);
+        firstGlobal=partition*(size);
         firstLocal = rank*partition;
         lastLocal = partition*(rank+1);
     }
+    /**logger(firstLocal);
+    logger(lastLocal);
+    logger(firstGlobal);
+    logger(lastGlobal);**/
     std::vector<double> localProfits;
     std::vector<double> localAssurances;
     for(int dayID=firstLocal;dayID<lastLocal;dayID++){
-        double profit;
-        double assurance;
-        runAnalysisOnDay(MULTITHREAD_PARENT_ON,in,&assurance,&profit,days.at(dayID),analysis);
+        double profit=1;
+        double assurance=1;
+        in.timeMax=days.at(dayID);
+        std::vector<analysisParameter> aps;
+        for(ticker t:globalTickers){
+            for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
+                if(globalDatapoints.at(i).time==days.at(dayID)){
+                    analysisParameter temp = in;
+                    temp.base=t;
+                    createBaseBounds(&temp,&globalDatapoints.at(i));
+                    aps.push_back(temp);
+                }   
+            }
+        }
+        std::vector<analysisParameter> garbage;
+        runAnalysisOnDay(MULTITHREAD_PARENT_ON,in,&assurance,&profit,aps,&garbage,analysis);
+        
         localProfits.push_back(profit);
         localAssurances.push_back(assurance);
     }
@@ -1178,26 +1200,41 @@ void backtestAnalysis(int MULTITHREAD_MODE,analysisParameter in,long long startD
             localResultsDispls.push_back(localResultsDispls.at(i-1)+localResultsCounts.at(i-1));
         }
         profits.resize(totalResults);
+        assurances.resize(totalResults);
         MPI_Allgatherv(&localProfits[0],localResultsCount,MPI_DOUBLE,(&profits[0]),&localResultsCounts[0],&localResultsDispls[0],MPI_DOUBLE,MPI_COMM_WORLD);
         MPI_Allgatherv(&localAssurances[0],localResultsCount,MPI_DOUBLE,(&assurances[0]),&localResultsCounts[0],&localResultsDispls[0],MPI_DOUBLE,MPI_COMM_WORLD);
     }else{
         profits= localProfits;
         assurances=localAssurances;
     }
-
     for(int dayID=firstGlobal;dayID<lastGlobal;dayID++){
-        double profit;
-        double assurance;
-        runAnalysisOnDay(MULTITHREAD_MODE,in,&assurance,&profit,days.at(dayID),analysis);
+        double profit=1;
+        double assurance=1;
+        in.timeMax=days.at(dayID);
+        std::vector<analysisParameter> aps;
+        for(ticker t:globalTickers){
+            for(int i =t.clusterStart;i<t.clusterEnd+1;i++){
+                if(globalDatapoints.at(i).time==days.at(dayID)){
+                    analysisParameter temp = in;
+                    temp.base=t;
+                    createBaseBounds(&temp,&globalDatapoints.at(i));
+                    aps.push_back(temp);
+                }   
+            }
+        }
+        std::vector<analysisParameter> garbage;
+        runAnalysisOnDay(MULTITHREAD_PARENT_ON,in,&assurance,&profit,aps,&garbage,analysis);
         profits.push_back(profit);
         assurances.push_back(assurance);
     }
 
     
     double assuranceSum=0;
+    
     for(int i =0;i<profits.size();i++){
+        
         *finalProfit *= 1+profits.at(i);
-        *finalAssurance *= assurances.at(i)>.51?1.33:.66;
+        *finalAssurance *= assurances.at(i)>.5?1/.71:.5/.71;
     }
 }
 
@@ -1257,7 +1294,7 @@ void safeAnalysis(analysisParameter in,std::vector<analysisParameter> *out){
             result.target = t;
             result.targetZScore=zout;
             out->push_back(result);
-            logger(result);
+            //logger(result);
         }
 }
 /**std::vector<analysisParameter> runAnalysisOnDay(int MULTITHREAD_MODE,analysisParameter analysisTemplate,std::vector<datapoint> testData){
@@ -1555,6 +1592,22 @@ void initialization(std::string inputFileName){
     
 
 }
+void generateTradableDaysVector(){
+    long long first=globalDatapoints.at(0).time;
+    long long last=first;
+    tradableDays.push_back(last);
+    for(ticker t:globalTickers){
+        for(int d=t.clusterStart;d<t.clusterEnd+1;d++){
+            if(globalDatapoints.at(d).time>last){
+                last=globalDatapoints.at(d).time;
+                tradableDays.push_back(last);
+            }else if(globalDatapoints.at(d).time<first){
+                first = globalDatapoints.at(d).time;
+                tradableDays.insert(tradableDays.begin(),first);
+            }
+        }
+    }
+}
 
 void startup(std::string datapointFileName,std::string tickerSchemaFileName){
 
@@ -1573,10 +1626,13 @@ void startup(std::string datapointFileName,std::string tickerSchemaFileName){
     if(rank==0) loadFileToDataStructure(&tickerSchemaFileName,&globalTickers,&parseStorageLineToTicker);
     logger("startup::Loaded File to ticker schemas Vector");
 
-
     logger("startup::sharing vectors");
     shareDatapoints();
     logger("startup::shared vectors");
+
+     logger("startup::Generating tradable days Vector");
+    generateTradableDaysVector();
+    logger("startup::Generated tradable days Vector");
 }
 
 void pruneGlobalVectorsToGivenLength(int lines){
@@ -1659,22 +1715,7 @@ void writeGlobalVectorsToFiles(std::string datapointFileName,std::string tickerF
 
 }
 
-void generateTradableDaysVector(){
-    long long first=globalDatapoints.at(0).time;
-    long long last=first;
-    tradableDays.push_back(last);
-    for(ticker t:globalTickers){
-        for(int d=t.clusterStart;d<t.clusterEnd+1;d++){
-            if(globalDatapoints.at(d).time>last){
-                last=globalDatapoints.at(d).time;
-                tradableDays.push_back(last);
-            }else if(globalDatapoints.at(d).time<first){
-                first = globalDatapoints.at(d).time;
-                tradableDays.insert(tradableDays.begin(),first);
-            }
-        }
-    }
-}
+
 
 
 
@@ -1708,6 +1749,7 @@ int main(int argc,char** argv){
     //run this when you get home
     addHeader("startup::");
     startup("../assets/KRGEdeepstorage","../assets/KRGESchemadeepstorage");
+    
     //startup("../assets/datapointdeepstorage","../assets/tickerschemadeepstorage");
     removeHeader();
 
@@ -1757,22 +1799,71 @@ int main(int argc,char** argv){
     .baseMin=__DBL_MAX__,
     .baseMax=__DBL_MIN__,
     .baseBoundMargin=.05,
-    .targetMin=0,
-    .targetMax=1,
+    .targetMin=-.01,
+    .targetMax=.01,
     .targetZScore=0,
-    .targetPercentInc=.6,
+    .targetPercentInc=.5,
     .baseDayDiff=0,
-    .targetDayDiff=2,
+    .targetDayDiff=1,
     .timeMin=LONG_LONG_MIN,
     .timeMax=LONG_LONG_MAX,
-    .targetDayOffset=2
+    .targetDayOffset=1
     };
 
-    double profit;
-    double assurance;
-    backtestAnalysis(MULTITHREAD_PARENT_OFF,testAP,LONG_LONG_MIN,LONG_LONG_MAX,&profit,&assurance,&safeAnalysis);
+    double profit=1;
+    double assurance=1;
+    addHeader("Testing");
+    backtestAnalysis(MULTITHREAD_PARENT_OFF,testAP,tradableDays.at(tradableDays.size()-50),LONG_LONG_MAX,&profit,&assurance,&safeAnalysis);
     logger(profit);
     logger(assurance);
+    removeHeader();
+
+    std::string todayVals="../assets/reports";
+    std::vector<datapoint> todayBuff;
+    //if(rank==0) loadFileToDataStructure(&todayVals,&todayBuff,&parseSourceCSVLineToDataPoint);
+    analysisParameter thisAP = analysisParameter
+        {
+        .baseMin=__DBL_MAX__,
+        .baseMax=__DBL_MIN__,
+        .baseBoundMargin=.05,
+        .targetMin=-.01,
+        .targetMax=.01,
+        .targetZScore=0,
+        .targetPercentInc=.5,
+        .baseDayDiff=0,
+        .targetDayDiff=1,
+        .timeMin=LONG_LONG_MIN,
+        .timeMax=LONG_LONG_MAX,
+        .targetDayOffset=1
+        };
+    std::vector<analysisParameter> aps;
+    for(datapoint d:todayBuff){
+        d.id=convertNameToID(d.name);
+        analysisParameter temp = thisAP;
+        for(ticker t:globalTickers){
+            if(t.id==d.id){
+                temp.base = t;
+            }
+        }
+        
+        
+        
+        createBaseBounds(&temp,&d);
+        aps.push_back(temp);
+        
+    }
+    int apsSize=aps.size();
+    MPI_Bcast(&apsSize,1,MPI_INT,0,MPI_COMM_WORLD);
+    aps.resize(apsSize);
+    MPI_Bcast(&aps[0],apsSize,analysisParameterDatatype,0,MPI_COMM_WORLD);
+    
+    double rightness=1;
+    double prof=1;
+    std::vector<analysisParameter> results;
+    //runAnalysisOnDay(MULTITHREAD_PARENT_ON,thisAP,&rightness,&prof,aps,&results,&safeAnalysis);
+   // logger(rightness);
+    //logger(prof);
+
     /**}
     catch (const char* msg) {
      std::cerr << msg << std::endl;
@@ -1787,7 +1878,7 @@ int main(int argc,char** argv){
     addHeader("writeResultsTofile");
   
     std::string fileNameProfit= "../assets/results";
-    //loadDatastructsToFile(&fileNameProfit,&out,&parseAnalysisParameterToStorageLine);
+    loadDatastructsToFile(&fileNameProfit,&results,&parseAnalysisParameterToStorageLine);
     removeHeader();
 
 
