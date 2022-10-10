@@ -44,9 +44,9 @@ void declareDatatypes(){
 	MPI_Type_commit(&tickerDatatype);
 
 
-    int aplengths[] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-	MPI_Aint apdisps[] = {offsetof(analysisParameter,base),offsetof(analysisParameter,target),offsetof(analysisParameter,baseTotal),offsetof(analysisParameter,baseInBound),offsetof(analysisParameter,targetTotal),offsetof(analysisParameter,targetInBound),offsetof(analysisParameter,baseMin),offsetof(analysisParameter,baseMax),offsetof(analysisParameter,baseBoundMargin),offsetof(analysisParameter,targetMin),offsetof(analysisParameter,targetMax),offsetof(analysisParameter,targetZScore),offsetof(analysisParameter,targetPercentInc),offsetof(analysisParameter,baseDayDiff),offsetof(analysisParameter,targetDayDiff),offsetof(analysisParameter,timeMin),offsetof(analysisParameter,timeMax),offsetof(analysisParameter,targetDayOffset)};
-	MPI_Datatype aptypes[] = {tickerDatatype,tickerDatatype,MPI_INT,MPI_INT,MPI_INT,MPI_INT,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_DOUBLE,MPI_LONG_LONG,MPI_LONG_LONG,MPI_LONG_LONG,MPI_LONG_LONG,MPI_LONG_LONG};
+    int aplengths[] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+	MPI_Aint apdisps[] = {offsetof(analysisParameter,base),offsetof(analysisParameter,baseMin),offsetof(analysisParameter,baseMax),offsetof(analysisParameter,baseDayDiff),offsetof(analysisParameter,target),offsetof(analysisParameter,targetMin),offsetof(analysisParameter,targetMax),offsetof(analysisParameter,targetDayDiff),offsetof(analysisParameter,targetDayOffset),offsetof(analysisParameter,timeMin),offsetof(analysisParameter,timeMax),offsetof(analysisParameter,zCutoff),offsetof(analysisParameter,pCutoff),offsetof(analysisParameter,baseInBound),offsetof(analysisParameter,baseTotal),offsetof(analysisParameter,targetInBound),offsetof(analysisParameter,targetTotal)};
+	MPI_Datatype aptypes[] = {tickerDatatype,MPI_DOUBLE,MPI_DOUBLE,MPI_LONG_LONG,tickerDatatype,MPI_DOUBLE,MPI_DOUBLE,MPI_LONG_LONG,MPI_LONG_LONG,MPI_LONG_LONG,MPI_LONG_LONG,MPI_DOUBLE,MPI_DOUBLE,MPI_INT,MPI_INT,MPI_INT,MPI_INT};
 	MPI_Type_create_struct(18,aplengths,apdisps,aptypes,&analysisParameterDatatype);
 	MPI_Type_commit(&analysisParameterDatatype);
 

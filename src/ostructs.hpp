@@ -33,18 +33,15 @@ struct analysisParameter{
     double baseMin=__DBL_MAX__;
     double baseMax=__DBL_MIN__;
     long long baseDayDiff=0;
-
     ticker target;
     double targetMin=__DBL_MAX__;
     double targetMax=__DBL_MIN__;
     long long targetDayDiff=0;
     long long targetDayOffset;
-    
     long long timeMin;
     long long timeMax;
     double zCutoff;
     double pCutoff;
-
     int baseInBound=0;
     int baseTotal=0;
     int targetInBound;
